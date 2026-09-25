@@ -1,0 +1,14 @@
+version: 2
+
+sources:
+  - name: zomato_bronze
+    database: workspace
+    schema: zomato_bronze
+    tables:
+      - name: bronze_restaurant
+      - name: bronze_users
+      - name: bronze_food
+      - name: bronze_menu
+      - name: bronze_orders
+      - name: bronze_order_items
+      - name: bronze_reviews

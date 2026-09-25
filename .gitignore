@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.pyc
+*.log
+venv/
+Data/
+*.vhdx
+data/
+.groq_model_cache.json

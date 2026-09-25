@@ -1,0 +1,35 @@
+version: 2
+
+models:
+  - name: dim_users
+    columns:
+      - name: user_id
+        data_tests:
+          - unique
+          - not_null
+  
+  # تعديل الاسم عشان يطابق اسم الملف عندك بالظبط
+  - name: dim_resturant
+    columns:
+      - name: restaurant_id
+        data_tests:
+          - unique
+          - not_null
+
+  - name: fact_orders
+    columns:
+      - name: order_id
+        data_tests:
+          - unique
+          - not_null
+      - name: restaurant_id
+        data_tests:
+          - relationships:
+              to: ref('dim_resturant')
+              field: restaurant_id
+      - name: user_id
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('dim_users')
+              field: user_id

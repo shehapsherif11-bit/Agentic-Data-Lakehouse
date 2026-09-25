@@ -1,0 +1,27 @@
+name: 'zomato_dbt'
+version: '1.0.0'
+
+# This setting configures which "profile" dbt uses for this project.
+profile: 'zomato_dbt'
+
+# These configurations specify where dbt should look for different types of files.
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+clean-targets:         # directories to be removed by `dbt clean`
+  - "target"
+  - "dbt_packages"
+
+# Configuring models
+models:
+  zomato_dbt:
+    # إعدادات طبقة السيلفر
+    silver:
+      +materialized: table
+    # إعدادات طبقة الجولد
+    gold:
+      +materialized: table
