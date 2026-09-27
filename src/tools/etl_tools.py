@@ -53,19 +53,54 @@ def extract_website_data(url: str, fields: str = "", max_pages: int = 1) -> str:
     """
     Intelligently extracts the most valuable data from a website URL.
     - url: the page to extract from (required).
-    - fields: optional comma-separated list of fields to prioritize
-      (e.g. "Product Name, Price, Description"). Leave empty to let the
-      engine decide what's valuable (structured data / article content).
+    - fields: comma-separated list of fields to extract, e.g. "Product Name, Price, Category".
+      ALWAYS pass this whenever the user names or implies specific data points to extract —
+      translate/normalize their wording into clear English labels first, even if they asked in
+      Arabic or another language. Leave empty ONLY when the user explicitly wants "whatever is
+      useful" with nothing specific named.
     - max_pages: how many pages of pagination to follow (default 1).
-    Automatically uses a lightweight HTTP fetch, and only falls back to a
-    headless browser if the page requires JavaScript to render.
+    Automatically uses a lightweight HTTP fetch, and only falls back to a headless browser if the
+    page requires JavaScript to render — or refuses outright and reports the failure honestly if the
+    site returns a bot-protection / CDN-challenge page (Akamai, Cloudflare, etc.) instead of real
+    content, rather than saving the block page as if it were data.
     """
     try:
         field_list = [f.strip() for f in fields.split(",") if f.strip()] or None
         path = pipeline.extract(url, fields=field_list, max_pages=max_pages)
+
+        fallback_note = _check_for_generic_fallback(path)
+        if fallback_note:
+            return f"PARTIAL RESULT (saved to {path}) — {fallback_note} Consider this a likely failure to find the requested data, not a full success."
         return f"SUCCESS: Extracted data from {url} and saved it to {path}."
     except Exception as e:
         return f"ERROR extracting website data: {e}"
+
+
+def _check_for_generic_fallback(path: str) -> str | None:
+    """Peeks at the written output to see whether pipeline.py had to fall
+    back to generic page metadata (see pipeline.py's `_note` field) rather
+    than finding the data actually requested, so this tool can report that
+    honestly instead of a bare SUCCESS the agent might relay uncritically."""
+    try:
+        if path.endswith(".csv"):
+            df = pd.read_csv(path, nrows=1)
+            if "_note" in df.columns:
+                return str(df["_note"].iloc[0])
+        elif path.endswith(".jsonl"):
+            with open(path, "r", encoding="utf-8") as f:
+                import json
+                row = json.loads(f.readline())
+                if "_note" in row:
+                    return row["_note"]
+        elif path.endswith(".json"):
+            import json
+            with open(path, "r", encoding="utf-8") as f:
+                rows = json.load(f)
+                if rows and isinstance(rows[0], dict) and "_note" in rows[0]:
+                    return rows[0]["_note"]
+    except Exception:
+        pass
+    return None
 
 
 @tool

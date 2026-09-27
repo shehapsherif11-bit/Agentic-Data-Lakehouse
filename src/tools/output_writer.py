@@ -1,4 +1,6 @@
 """
+src/tools/output_writer.py
+
 Normalizes extracted records into a clean, deduplicated dataset and picks
 the right output format (CSV for flat tabular data, JSON/JSONL when records
 carry nested structures that CSV can't represent well).
@@ -12,7 +14,7 @@ from urllib.parse import urlparse
 
 import pandas as pd
 
-import config
+from src.tools import config
 
 logger = logging.getLogger("etl.output")
 

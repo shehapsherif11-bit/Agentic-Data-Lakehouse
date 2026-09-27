@@ -1,8 +1,8 @@
 """
+src/tools/fetchers.py
+
 Fetch layer: tries a fast static HTTP request first, and only pays the cost
 of a full headless browser when the page actually needs JS to render content.
-This is the single biggest performance win over the old design, which always
-launched Selenium/Chrome for every website regardless of whether it needed it.
 """
 import asyncio
 import hashlib
@@ -14,7 +14,7 @@ from dataclasses import dataclass
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-import config
+from src.tools import config
 
 logger = logging.getLogger("etl.fetchers")
 

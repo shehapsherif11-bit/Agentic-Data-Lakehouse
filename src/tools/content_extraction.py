@@ -2,16 +2,18 @@
 Content understanding layer.
 
 Given raw HTML this module answers three questions:
-  1. Does the page already carry machine-readable structured data (JSON-LD /
-     OpenGraph / meta tags)? If so, that is the most reliable and cheapest
-     source of truth and should be preferred over any LLM guesswork.
+  1. Does the page already carry machine-readable structured data (JSON-LD)?
+     If so, that is the most reliable and cheapest source of truth and
+     should be preferred over any LLM guesswork. (OpenGraph/meta tags are
+     handled separately — see the note on extract_opengraph() below.)
   2. Does the page look like a *listing* of repeated items (product grid,
      article list, table rows)? If so, isolate each item's block of text so
      downstream extraction can work item-by-item instead of guessing at the
      page as a whole.
   3. Otherwise, what is the single main "article" content of the page, with
      boilerplate (nav, ads, footers, cookie banners) stripped out?
-It also finds "next page" links for pagination.
+It also finds "next page" links for pagination, and detects bot-protection
+/ CDN-challenge pages so they're never mistaken for real content.
 """
 import json
 import re
@@ -27,9 +29,44 @@ logger = logging.getLogger("etl.content")
 BOILERPLATE_TAGS = ["script", "style", "noscript", "header", "footer", "nav", "svg", "form", "iframe"]
 BOILERPLATE_HINTS = re.compile(r"(cookie|newsletter|subscribe|advert|breadcrumb|sidebar|^nav$)", re.I)
 
+# Phrases that reliably show up on bot-protection / CDN-challenge / access-
+# denied pages (Akamai, Cloudflare, PerimeterX, Imperva, generic WAFs).
+# These pages are almost always short and dominated by one of these
+# phrases — a page that's long AND happens to mention e.g. "captcha" in
+# passing (a security blog) should NOT be flagged, hence the length guard
+# in looks_like_blocked_page().
+BLOCK_PAGE_SIGNATURES = (
+    "access denied", "reference #", "edgesuite.net", "akamai",
+    "request blocked", "attention required", "cloudflare",
+    "are you a human", "pardon our interruption", "captcha",
+    "unusual traffic", "403 forbidden", "just a moment",
+    "checking your browser", "bot detection", "security check",
+    "verify you are a human", "ray id",
+)
 
-def extract_structured_data(html: str) -> list[dict]:
-    """Pull schema.org JSON-LD blocks, with OpenGraph/meta as a fallback."""
+
+class BlockedPageError(Exception):
+    """Raised when a fetched page looks like a bot-protection / CDN
+    challenge / access-denied page rather than real site content. The
+    pipeline must never silently extract one of these as if it were the
+    requested data."""
+
+
+def looks_like_blocked_page(html: str) -> bool:
+    soup = BeautifulSoup(html, "lxml")
+    for tag in soup(["script", "style"]):
+        tag.extract()
+    text = soup.get_text(" ", strip=True).lower()
+    if len(text) > 1500:  # real pages are rarely this short; avoid false positives on long legit pages
+        return False
+    return any(sig in text for sig in BLOCK_PAGE_SIGNATURES)
+
+
+def extract_json_ld(html: str) -> list[dict]:
+    """Pull schema.org JSON-LD blocks only. This is a deliberate structured
+    declaration by the site author (Product, Offer, ItemList, Article,
+    etc.) — a strong, trustworthy signal of real data, unlike generic
+    OpenGraph/meta tags (see extract_opengraph() below)."""
     soup = BeautifulSoup(html, "lxml")
     records: list[dict] = []
 
@@ -46,16 +83,40 @@ def extract_structured_data(html: str) -> list[dict]:
             if isinstance(c, dict):
                 records.append(c)
 
-    if not records:
-        og = {}
-        for tag in soup.find_all("meta"):
-            prop = tag.get("property") or tag.get("name")
-            if prop and (prop.startswith("og:") or prop in ("description", "author")):
-                og[prop.replace("og:", "")] = tag.get("content")
-        if og:
-            records.append(og)
-
     return records
+
+
+def extract_opengraph(html: str) -> dict:
+    """Pull OpenGraph/meta tags (og:title, description, author, ...).
+
+    IMPORTANT: these are generic SEO/social-sharing tags present on almost
+    every modern webpage — a blog, a SaaS landing page, and a real product
+    listing all have them. They are NOT evidence that the page contains
+    the specific data the user asked for, and must never be treated as
+    "the answer" the way JSON-LD can be. Callers should only fall back to
+    this as an absolute last resort, after listing detection and main-
+    content extraction have both failed to find anything more specific —
+    and should clearly flag the result as generic page metadata, not the
+    requested data."""
+    soup = BeautifulSoup(html, "lxml")
+    og = {}
+    for tag in soup.find_all("meta"):
+        prop = tag.get("property") or tag.get("name")
+        if prop and (prop.startswith("og:") or prop in ("description", "author")):
+            og[prop.replace("og:", "")] = tag.get("content")
+    return og
+
+
+def extract_structured_data(html: str) -> list[dict]:
+    """Backward-compatible convenience wrapper: JSON-LD if present,
+    otherwise a single OpenGraph record. New code should prefer calling
+    extract_json_ld() and extract_opengraph() separately so it can apply
+    different trust levels to each (see pipeline.py)."""
+    records = extract_json_ld(html)
+    if records:
+        return records
+    og = extract_opengraph(html)
+    return [og] if og else []
 
 
 def extract_main_content(html: str, url: str) -> dict:

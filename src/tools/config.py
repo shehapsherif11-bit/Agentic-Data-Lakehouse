@@ -25,6 +25,12 @@ GROQ_FALLBACK_MODEL = "openai/gpt-oss-20b"  # last-resort default if live resolu
 LLM_TEMPERATURE = 0.0
 LLM_MAX_CHARS_PER_CHUNK = 9000          # keep well under context window per call
 LLM_MAX_CHUNKS = 6                      # hard cap so one page can't explode into dozens of calls
+LLM_MAX_ITEMS_PER_CHUNK = 8             # cap items bundled into one LLM call for listing extraction —
+                                         # prevents e.g. 34 short items being asked for in a single response
+                                         # (risks truncation on small models) and limits blast radius of a
+                                         # single failed call (rate limit, etc.) to a small batch, not everything
+LLM_MAX_OUTPUT_TOKENS = 2000            # generous headroom for a batch of LLM_MAX_ITEMS_PER_CHUNK structured rows
+LLM_INTER_CALL_DELAY = 1.5              # seconds paced between consecutive batch calls to ease rate-limit pressure
 
 _active_model_cache: dict[str, str] = {}
 
@@ -43,7 +49,7 @@ def get_active_groq_model() -> str:
         return GROQ_MODEL_OVERRIDE
 
     from langchain_groq import ChatGroq
-    import groq_model_resolver
+    from src.tools import groq_model_resolver
 
     def factory(model_id: str) -> ChatGroq:
         return ChatGroq(model=model_id, temperature=0.0, api_key=GROQ_API_KEY, max_retries=1, request_timeout=15)
