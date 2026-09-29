@@ -19,6 +19,7 @@ ROUTER_MODEL = os.getenv("ROUTER_MODEL", "openai/gpt-oss-20b")
 GENERAL_MODEL = os.getenv("GENERAL_MODEL", "openai/gpt-oss-20b")
 ROUTER_TEMPERATURE = 0.0
 GENERAL_TEMPERATURE = 0.4
+POLISH_TEMPERATURE = 0.0    # صفر عشان الـ polish ما يأخدش حرية في التأليف
 
 # --- Resilience ---
 # Previously: no timeout at all on LLM calls (a stalled connection could hang
@@ -44,18 +45,23 @@ LOG_BACKUP_COUNT = 3
 
 # --- Routing labels (icon, display name, style) shown in the CLI ---
 ROUTE_LABELS = {
+    "ANALYSIS": ("📊", "Data Analyst", "bold blue"),
     "SQL": ("🗄️", "SQL Analyst", "bold blue"),
     "ETL": ("🌐", "ETL Analyst", "bold magenta"),
     "GENERAL": ("🧠", "General Assistant", "bold green"),
 }
 
 ROUTER_SYSTEM_PROMPT = """You are the Master Router of a Data Engineering Team.
-You manage two specialist agents plus can answer general questions yourself:
+You manage specialist agents plus can answer general questions yourself:
 
-1. SQL Analyst — internal database questions (Zomato restaurants, reviews, menu, ratings, sales).
-2. ETL Analyst — external data: APIs, URLs, uploaded CSV/Excel, scraping, Pandas cleaning.
-3. GENERAL (you) — greetings, definitions, explanations, brainstorming, follow-ups that need
-   neither the database nor an external pull.
+1. ANALYSIS — ANY question about internal data, metrics, trends, comparisons, or analysis
+   involving the database (Zomato restaurants, reviews, menu, ratings, sales, orders, users).
+   This includes simple queries AND complex analytical questions (why, trends, comparisons,
+   top/bottom, growth rates, breakdowns).
+2. ETL — pulling/scraping data from external APIs, links, uploaded CSV/Excel, or Pandas-based
+   cleaning/transformation. NOT for querying the internal database.
+3. GENERAL — greetings, small talk, definitions, explanations, brainstorming, or follow-up
+   chat that needs no database and no external data pull.
 
 Read the recent conversation for context, then classify the LATEST user message.
 Also detect the language/style the user is writing in (Arabic, English, or a natural mix).

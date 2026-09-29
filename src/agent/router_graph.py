@@ -84,6 +84,12 @@ except Exception as e:  # noqa: BLE001
     etl_system_prompt = ""
     logger.warning("ETL agent unavailable at import time: %s", e)
 
+try:
+    from src.agent.analyst_graph import analyst_agent
+except Exception as e:  # noqa: BLE001
+    analyst_agent = None
+    logger.warning("Analyst agent unavailable at import time: %s", e)
+
 
 # ==========================================
 # LLMs
@@ -100,13 +106,15 @@ def _make_llm(model: str, temperature: float) -> ChatGroq:
 
 router_llm = _make_llm(cfg.ROUTER_MODEL, cfg.ROUTER_TEMPERATURE)
 general_llm = _make_llm(cfg.GENERAL_MODEL, cfg.GENERAL_TEMPERATURE)
+polish_llm = _make_llm(cfg.GENERAL_MODEL, cfg.POLISH_TEMPERATURE)
 
 
 class RouteDecision(BaseModel):
-    agent: Literal["SQL", "ETL", "GENERAL"] = Field(
+    agent: Literal["ANALYSIS", "SQL", "ETL", "GENERAL"] = Field(
         description=(
-            "SQL: internal database questions (Zomato restaurants, reviews, menu, "
-            "sales, ratings — anything living in SQL tables). "
+            "ANALYSIS: any question about internal data, metrics, trends, comparisons, "
+            "or analysis involving the database (Zomato). "
+            "SQL: direct database queries (legacy fallback — prefer ANALYSIS). "
             "ETL: pulling/scraping data from external APIs, links, uploaded files, "
             "or Pandas-based cleaning/transformation. "
             "GENERAL: greetings, small talk, definitions, explanations, brainstorming, "
@@ -131,6 +139,10 @@ class AgentState(TypedDict):
     language: str
     raw_answer: str
     final_answer: str
+    viz_html: str
+    llm_call_count: int
+    stage_latencies: dict
+    analyst_memory: dict
 
 
 # ==========================================
@@ -196,6 +208,56 @@ def router_node(state: AgentState) -> dict:
         "reasoning": decision.reasoning,
         "language": decision.language,
     }
+
+
+def analysis_node(state: AgentState) -> dict:
+    """Routes analytical questions through the full analytical pipeline."""
+    if analyst_agent is None:
+        logger.error("analysis_node called but the analyst agent failed to import.")
+        return {"raw_answer": "[Analyst agent is unavailable: it failed to load at startup — check the logs.]"}
+
+    question = state["messages"][-1].content
+    lang = state.get("language", "en")
+    try:
+        # We must pass the actual message objects so the analyst_graph 
+        # can maintain its own conversational state for follow-ups!
+        analyst_input = {
+            "messages": state["messages"][-cfg.SUBAGENT_HISTORY_MESSAGES:],
+            "language": lang,
+            "retry_count": 0,
+            "current_step": 0,
+        }
+        
+        # Inject previous state if available
+        memory = state.get("analyst_memory", {})
+        if memory:
+            analyst_input.update(memory)
+            
+        result = analyst_agent.invoke(analyst_input)
+        answer = result.get("final_answer", "No answer generated.")
+        viz_html = result.get("viz_html", "")
+
+        # Save context for next follow-up
+        new_memory = {
+            "previous_question": result.get("previous_question"),
+            "previous_plan": result.get("analysis_plan"),
+            "previous_results": result.get("query_results")
+        }
+
+        # Pass visualization HTML and telemetry to the outer state
+        output = {
+            "final_answer": answer, 
+            "messages": [AIMessage(content=answer)],
+            "viz_html": viz_html,
+            "llm_call_count": result.get("llm_call_count", 0),
+            "stage_latencies": result.get("stage_latencies", {}),
+            "analyst_memory": new_memory
+        }
+        return output
+    except Exception as e:
+        logger.error("Analysis agent failed: %s", e)
+        error_msg = f"Sorry, I encountered an internal error during the analysis: {e}"
+        return {"final_answer": error_msg, "messages": [AIMessage(content=error_msg)]}
 
 
 def sql_node(state: AgentState) -> dict:
@@ -285,17 +347,35 @@ def polish_node(state: AgentState) -> dict:
     lang = state.get("language", "en")
     raw = state.get("raw_answer", "")
 
+    # ❶ لو الإجابة الخام فاضية أو فيها error، رجّعها زي ما هي بدون "تحسين"
+    if not raw or not raw.strip():
+        fallback = "لم يتم العثور على إجابة من قاعدة البيانات." if lang == "ar" else "No answer was returned from the database."
+        return {"final_answer": fallback, "messages": [AIMessage(content=fallback)]}
+
+    raw_lower = raw.lower()
+    if any(kw in raw_lower for kw in ["error", "unavailable", "failed to load", "no answer"]):
+        return {"final_answer": raw, "messages": [AIMessage(content=raw)]}
+
+    # ❷ تعليمات صارمة لمنع التأليف
     system = cfg.POLISH_SYSTEM_PROMPT_TEMPLATE.format(
         language_instruction=cfg.LANGUAGE_INSTRUCTIONS.get(lang, cfg.LANGUAGE_INSTRUCTIONS["en"])
     )
+    system += (
+        "\n\nSTRICT RULE: You MUST ONLY rephrase the specialist's raw answer. "
+        "Do NOT add any new facts, numbers, names, or information that is not explicitly "
+        "present in the raw answer. If the raw answer contains no data, say so clearly. "
+        "NEVER make up or invent data."
+    )
+
     messages = [
         SystemMessage(content=system),
         HumanMessage(content=f"User's question: {question}\n\nSpecialist's raw answer:\n{raw}"),
     ]
 
+    # ❸ استخدام polish_llm (temperature=0.0) بدل general_llm
     @_retrying("polish")
     def _call():
-        return general_llm.invoke(messages).content.strip()
+        return polish_llm.invoke(messages).content.strip()
 
     try:
         final = _call()
@@ -319,13 +399,22 @@ def build_graph(checkpointer=None):
     graph = StateGraph(AgentState)
 
     graph.add_node("router", router_node)
+    graph.add_node("analysis", analysis_node)
     graph.add_node("sql", sql_node)
     graph.add_node("etl", etl_node)
     graph.add_node("general", general_node)
     graph.add_node("polish", polish_node)
 
     graph.set_entry_point("router")
-    graph.add_conditional_edges("router", route_decision, {"SQL": "sql", "ETL": "etl", "GENERAL": "general"})
+    graph.add_conditional_edges("router", route_decision, {
+        "ANALYSIS": "analysis",
+        "SQL": "sql",
+        "ETL": "etl",
+        "GENERAL": "general",
+    })
+    # ANALYSIS → END directly (the analyst pipeline generates its own final answer + viz)
+    graph.add_edge("analysis", END)
+    # Legacy SQL + ETL still go through polish
     graph.add_edge("sql", "polish")
     graph.add_edge("etl", "polish")
     graph.add_edge("polish", END)

@@ -61,10 +61,47 @@ async def _fetch_static(client: httpx.AsyncClient, url: str) -> httpx.Response:
 
 
 def _looks_js_rendered(html: str) -> bool:
-    """Heuristic: very little visible text relative to markup usually means
-    the real content is injected client-side (React/Vue/Angular shells)."""
+    """Heuristic: detects pages that need a full browser to render real content.
+
+    Two cases are caught:
+      1. JS shell pages (React/Vue/Angular SPA) — very little visible text
+         relative to markup, meaning the real content is injected client-side.
+      2. SSR/hydrated apps (Vite, TanStack Router, Next.js, Nuxt, Remix) —
+         the HTML contains pre-rendered text (passes the text-length check),
+         but dynamic data like prices/inventory is populated after JS
+         hydration. These frameworks embed characteristic markers we can
+         detect to force a browser fetch.
+    """
     from bs4 import BeautifulSoup
 
+    html_lower = html.lower()
+
+    # Case 2: SSR framework markers — these apps pre-render text but hydrate
+    # dynamic data (prices, stock, etc.) client-side, so static fetching gets
+    # stale/placeholder values even though there's plenty of visible text.
+    SSR_FRAMEWORK_MARKERS = [
+        '__next',             # Next.js
+        '__nuxt',             # Nuxt.js
+        '__remix',            # Remix
+        '$_tsr',              # TanStack Router (this specific site uses it)
+        'self.$r',            # TanStack Router SSR hydration
+        '_buildmanifest.js',  # Next.js build manifest
+        '__sveltekit',        # SvelteKit
+        'tanstack',           # TanStack generic
+    ]
+    if any(marker in html_lower for marker in SSR_FRAMEWORK_MARKERS):
+        logger.info("SSR framework detected (hydrated app) — browser rendering required for accurate data")
+        return True
+
+    # Also detect generic Vite/React SSR when there's a root mount point
+    # and bundled JS assets (common pattern for Lovable, Vercel, etc.)
+    has_root_mount = 'id="root"' in html or 'id="app"' in html or 'id="__next"' in html
+    has_bundled_js = '/assets/' in html and ('.js"' in html or ".js'" in html)
+    if has_root_mount and has_bundled_js:
+        logger.info("Likely SSR app detected (root mount + bundled JS) — browser rendering required")
+        return True
+
+    # Case 1: classic JS shell detection — very little visible text
     soup = BeautifulSoup(html, "lxml")
     for tag in soup(["script", "style", "noscript"]):
         tag.extract()
@@ -103,6 +140,10 @@ async def _fetch_with_browser(url: str) -> str:
         try:
             page = await browser.new_page(user_agent=config.HTTP_USER_AGENT)
             await page.goto(url, timeout=config.BROWSER_NAV_TIMEOUT_MS, wait_until=config.BROWSER_WAIT_UNTIL)
+            # Wait a bit extra for JS hydration to complete — SSR apps
+            # (React/Vue/TanStack) load the HTML shell first but populate
+            # dynamic data (prices, stock, etc.) after hydration finishes.
+            await page.wait_for_timeout(2000)
             html = await page.content()
             return html
         finally:

@@ -191,40 +191,4 @@ def extract(
                 json.dump(rows, f, ensure_ascii=False, indent=2, default=str)
         return output_path
 
-    return output_writer.write(rows, url, fmt=output_format)
-
-
-
-def extract(
-    url: str,
-    fields: Optional[list[str]] = None,
-    output_path: Optional[str] = None,
-    output_format: Optional[str] = None,
-    max_pages: int = config.DEFAULT_MAX_PAGES,
-) -> str:
-    """
-    Main entry point.
-      url            - required, the page (or first page of a listing) to extract from
-      fields         - optional list of field names to prioritize; if omitted the
-                        engine infers what's valuable (structured data / article content)
-      output_path    - optional explicit path; auto-generated (descriptive, timestamped) if omitted
-      output_format  - optional 'csv' | 'json' | 'jsonl'; auto-selected from the data shape if omitted
-      max_pages      - how many pages of pagination to follow (default 1 = no pagination)
-    """
-    rows = asyncio.run(_run(url, fields, max_pages))
-    if not rows:
-        raise ValueError(f"No extractable data found at {url}.")
-
-    if output_path:
-        rows = output_writer.normalize(output_writer.dedupe(rows))
-        fmt = output_format or (output_path.rsplit(".", 1)[-1] if "." in output_path else "csv")
-        if fmt == "csv":
-            import pandas as pd
-            pd.DataFrame(rows).to_csv(output_path, index=False, encoding="utf-8-sig")
-        else:
-            import json
-            with open(output_path, "w", encoding="utf-8") as f:
-                json.dump(rows, f, ensure_ascii=False, indent=2, default=str)
-        return output_path
-
-    return output_writer.write(rows, url, fmt=output_format)
+    return output_writer.write(rows, url, fmt=output_format)

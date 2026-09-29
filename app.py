@@ -30,11 +30,12 @@ if _AI_AGENTS_PATH not in sys.path:
 # its own presentation layer. This also avoids paying for/needing those
 # optional CLI dependencies in a web deployment.
 try:
-    from src.agent.router_graph import build_graph, sql_analyst_agent, etl_analyst_agent, logger
+    from src.agent.router_graph import build_graph, sql_analyst_agent, etl_analyst_agent, analyst_agent, logger
     from src.agent.router_config import ROUTE_LABELS, GROQ_API_KEY
     IMPORT_ERROR = None
 except Exception as e:  # noqa: BLE001 - surfaced to the user as a friendly startup error below
     IMPORT_ERROR = e
+    analyst_agent = None
     logger = logging.getLogger("streamlit_app")
 
 MAX_INPUT_CHARS = 4000       # guard against pasting huge blobs of text into the chat
@@ -42,6 +43,7 @@ MAX_HISTORY_MESSAGES = 60    # cap in-memory chat history so a very long session
 
 NODE_STATUS_LABELS = {
     "router": "🧭 تحليل السؤال وتحديد الوكيل المناسب...",
+    "analysis": "📊 يتم تحليل السؤال بعمق...",
     "sql": "🗄️ يتم الاستعلام من قاعدة البيانات...",
     "etl": "🌐 يتم تنفيذ عملية الاستخراج / المعالجة...",
     "general": "🧠 يتم صياغة الرد...",
@@ -124,10 +126,15 @@ with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/2042/2042885.png", width=100)
     st.title("⚙️ System Status")
 
+    if analyst_agent is not None:
+        st.success("✅ Data Analyst: Online")
+    else:
+        st.error("❌ Data Analyst: Unavailable")
+
     if sql_analyst_agent is not None:
         st.success("✅ SQL Agent: Online")
     else:
-        st.error("❌ SQL Agent: Unavailable")
+        st.warning("⚠️ SQL Agent: Unavailable (legacy)")
 
     if etl_analyst_agent is not None:
         st.success("✅ ETL Agent: Online")
@@ -138,8 +145,10 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("### 💡 أمثلة للأسئلة:")
-    st.info("- ما هي أفضل 3 مطاعم بناءً على التقييم؟")
-    st.info("- Extract data from 'https://jsonplaceholder.typicode.com/users' and filter company 'Romaguera-Crona'.")
+    st.info("📊 Show me revenue by month")
+    st.info("📈 What is the average order value by city?")
+    st.info("🔍 Why did sales decline? Which restaurant contributed most?")
+    st.info("🌐 Extract data from an API URL")
 
     st.markdown("---")
     col1, col2 = st.columns(2)
@@ -161,8 +170,8 @@ with st.sidebar:
 # ==========================================
 # 7. Chat interface
 # ==========================================
-st.title("📊 Zomato AI Data Assistant")
-st.markdown("Powered by LangGraph & Databricks")
+st.title("📊 Zomato AI Data Analyst")
+st.markdown("Powered by LangGraph, Databricks & Agentic AI")
 
 for i, msg in enumerate(st.session_state.chat_history):
     if isinstance(msg, HumanMessage):
@@ -173,8 +182,23 @@ for i, msg in enumerate(st.session_state.chat_history):
             st.markdown(msg.content)
             meta = st.session_state.turn_meta.get(i)
             if meta:
-                emoji, name, _ = ROUTE_LABELS.get(meta["route"], ("🧭", meta["route"], "bold"))
-                st.caption(f"{emoji} {name} · confidence {meta['confidence']:.2f}")
+                if meta.get("viz_html"):
+                    st.components.v1.html(meta["viz_html"], height=450, scrolling=True)
+                
+                emoji, name, _ = ROUTE_LABELS.get(meta.get("route", ""), ("🧭", meta.get("route", ""), "bold"))
+                caption_text = f"{emoji} {name} · confidence {meta.get('confidence', 0.0):.2f}"
+                
+                llm_calls = meta.get("llm_call_count")
+                if llm_calls:
+                    latencies = meta.get("stage_latencies", {})
+                    total_time = sum(latencies.values()) if latencies else 0
+                    caption_text += f" | ⏱️ {total_time:.1f}s | 🧠 {llm_calls} LLM Calls"
+                
+                st.caption(caption_text)
+                
+                if meta.get("stage_latencies"):
+                    with st.expander("Performance Stats (Latencies)"):
+                        st.json(meta["stage_latencies"])
 
 # ==========================================
 # 8. Handle new user input
@@ -209,9 +233,27 @@ if user_query:
 
                 status_box.update(label="✅ تم", state="complete")
                 st.markdown(final_answer)
+
+                # Render visualization if the analyst pipeline generated one
+                viz_html = snapshot.get("viz_html", "")
+                if viz_html:
+                    st.components.v1.html(viz_html, height=450, scrolling=True)
+
                 if route_meta:
                     emoji, name, _ = ROUTE_LABELS.get(route_meta["route"], ("🧭", route_meta["route"], "bold"))
-                    st.caption(f"{emoji} {name} · confidence {route_meta['confidence']:.2f}")
+                    caption_text = f"{emoji} {name} · confidence {route_meta['confidence']:.2f}"
+                    
+                    llm_calls = snapshot.get("llm_call_count")
+                    if llm_calls:
+                        latencies = snapshot.get("stage_latencies", {})
+                        total_time = sum(latencies.values()) if latencies else 0
+                        caption_text += f" | ⏱️ {total_time:.1f}s | 🧠 {llm_calls} LLM Calls"
+                    
+                    st.caption(caption_text)
+                    
+                    if snapshot.get("stage_latencies"):
+                        with st.expander("Performance Stats (Latencies)"):
+                            st.json(snapshot.get("stage_latencies"))
 
             except Exception as e:
                 # Log the full exception server-side; show the user a short,
@@ -223,8 +265,15 @@ if user_query:
                 st.error(final_answer)
 
         st.session_state.chat_history.append(AIMessage(content=final_answer))
-        if route_meta:
-            st.session_state.turn_meta[len(st.session_state.chat_history) - 1] = route_meta
+        
+        # Save meta, visualization and stats to survive Streamlit reruns
+        meta_to_save = route_meta or {}
+        if snapshot:
+            meta_to_save["viz_html"] = snapshot.get("viz_html", "")
+            meta_to_save["llm_call_count"] = snapshot.get("llm_call_count", 0)
+            meta_to_save["stage_latencies"] = snapshot.get("stage_latencies", {})
+            
+        st.session_state.turn_meta[len(st.session_state.chat_history) - 1] = meta_to_save
 
         # Keep the in-memory history bounded so a very long-running session
         # doesn't grow the page/session state indefinitely.

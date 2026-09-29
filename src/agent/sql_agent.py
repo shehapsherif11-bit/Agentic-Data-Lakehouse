@@ -138,7 +138,22 @@ def execute_sql(state: SQLAgentState) -> dict:
     return {"sql_execution_result": str(result)}
 
 def represent_final_answer(state: SQLAgentState) -> dict:
-    represent_prompt = f"You are a helpful Data Analyst. Translate the raw SQL execution results into a clear, natural answer for the user.\nUser Question: {state.curated_question}\nSQL Execution Result: {state.sql_execution_result}"
+    # لو النتيجة فيها error، قول كده صراحة بدل ما تحاول "تشرح" الerror
+    if "error" in state.sql_execution_result.lower():
+        return {"final_answer": f"حصل خطأ أثناء تنفيذ الاستعلام:\n{state.sql_execution_result}"}
+
+    if not state.sql_execution_result or state.sql_execution_result.strip() in ("", "[]", "None"):
+        return {"final_answer": "الاستعلام لم يرجع أي نتائج من قاعدة البيانات."}
+
+    represent_prompt = (
+        f"You are a helpful Data Analyst. Translate the raw SQL execution results "
+        f"into a clear, natural answer for the user.\n"
+        f"IMPORTANT: ONLY use the data provided below. Do NOT add any information, "
+        f"numbers, or facts that are not explicitly in the SQL results. "
+        f"If the results are empty or unclear, say so honestly.\n"
+        f"User Question: {state.curated_question}\n"
+        f"SQL Execution Result: {state.sql_execution_result}"
+    )
     response = llm.invoke(represent_prompt)
     return {"final_answer": response.content}
 
