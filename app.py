@@ -30,12 +30,13 @@ if _AI_AGENTS_PATH not in sys.path:
 # its own presentation layer. This also avoids paying for/needing those
 # optional CLI dependencies in a web deployment.
 try:
-    from src.agent.router_graph import build_graph, sql_analyst_agent, etl_analyst_agent, analyst_agent, logger
+    from src.agent.router_graph import build_graph, etl_analyst_agent, analyst_agent, logger
     from src.agent.router_config import ROUTE_LABELS, GROQ_API_KEY
     IMPORT_ERROR = None
 except Exception as e:  # noqa: BLE001 - surfaced to the user as a friendly startup error below
     IMPORT_ERROR = e
     analyst_agent = None
+    etl_analyst_agent = None
     logger = logging.getLogger("streamlit_app")
 
 MAX_INPUT_CHARS = 4000       # guard against pasting huge blobs of text into the chat
@@ -43,8 +44,7 @@ MAX_HISTORY_MESSAGES = 60    # cap in-memory chat history so a very long session
 
 NODE_STATUS_LABELS = {
     "router": "🧭 تحليل السؤال وتحديد الوكيل المناسب...",
-    "analysis": "📊 يتم تحليل السؤال بعمق...",
-    "sql": "🗄️ يتم الاستعلام من قاعدة البيانات...",
+    "analysis": "📊 يتم تحليل السؤال بعمق وتدقيق الأرقام...",
     "etl": "🌐 يتم تنفيذ عملية الاستخراج / المعالجة...",
     "general": "🧠 يتم صياغة الرد...",
     "polish": "✨ يتم صقل الإجابة النهائية...",
@@ -127,19 +127,19 @@ with st.sidebar:
     st.title("⚙️ System Status")
 
     if analyst_agent is not None:
-        st.success("✅ Data Analyst: Online")
+        st.success("✅ Data Analyst: Online (Guarded)")
     else:
         st.error("❌ Data Analyst: Unavailable")
 
-    if sql_analyst_agent is not None:
-        st.success("✅ SQL Agent: Online")
-    else:
-        st.warning("⚠️ SQL Agent: Unavailable (legacy)")
+    # B0.1 Legacy SQL route quarantined for security
+    st.info("🔒 SQL Direct: Retired (Protected via Analyst)")
 
-    if etl_analyst_agent is not None:
+    # B0.2 ETL Agent gated behind ENABLE_ETL_AGENT feature flag
+    etl_enabled = os.getenv("ENABLE_ETL_AGENT", "false").lower() in ("true", "1", "yes")
+    if etl_enabled and etl_analyst_agent is not None:
         st.success("✅ ETL Agent: Online")
     else:
-        st.error("❌ ETL Agent: Unavailable")
+        st.warning("🔒 ETL Agent: Disabled (Security Sandbox Flag)")
 
     st.success("✅ Master Router: Active")
 
