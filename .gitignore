@@ -7,3 +7,6 @@ Data/
 *.vhdx
 data/
 .groq_model_cache.json
+eval/
+*.jsonl
+scratch/

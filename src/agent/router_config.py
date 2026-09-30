@@ -15,8 +15,9 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 # Previously hardcoded inline as "openai/gpt-oss-20b" for both roles with no
 # way to override. Now configurable per-role via env vars, with the same
 # defaults preserved.
-ROUTER_MODEL = os.getenv("ROUTER_MODEL", "openai/gpt-oss-20b")
-GENERAL_MODEL = os.getenv("GENERAL_MODEL", "openai/gpt-oss-20b")
+ROUTER_MODEL = os.getenv("ROUTER_MODEL", "openai/gpt-oss-120b")
+GENERAL_MODEL = os.getenv("GENERAL_MODEL", "openai/gpt-oss-120b")
+FALLBACK_MODEL = os.getenv("FALLBACK_MODEL", "openai/gpt-oss-20b")
 ROUTER_TEMPERATURE = 0.0
 GENERAL_TEMPERATURE = 0.4
 POLISH_TEMPERATURE = 0.0    # صفر عشان الـ polish ما يأخدش حرية في التأليف
@@ -26,8 +27,8 @@ POLISH_TEMPERATURE = 0.0    # صفر عشان الـ polish ما يأخدش حر
 # the whole CLI forever), and retries were done by hand with a fixed linear
 # backoff. Both are now explicit and consistent with the ETL project's use
 # of `tenacity`.
-LLM_REQUEST_TIMEOUT = 30          # seconds, per LLM call
-LLM_MAX_RETRIES = 3               # library-level retries inside ChatGroq itself
+LLM_REQUEST_TIMEOUT = 15          # seconds, per LLM call
+LLM_MAX_RETRIES = 2               # library-level retries inside ChatGroq itself
 NODE_RETRY_ATTEMPTS = 3           # our own retry wrapper around each node's LLM/agent call
 NODE_RETRY_MIN_WAIT = 1.0
 NODE_RETRY_MAX_WAIT = 6.0
@@ -43,25 +44,24 @@ LOG_FILENAME = "router.log"
 LOG_MAX_BYTES = 2_000_000
 LOG_BACKUP_COUNT = 3
 
+# --- Feature Flags ---
+ENABLE_ETL_AGENT = os.getenv("ENABLE_ETL_AGENT", "false").lower() in ("true", "1", "yes")
+
 # --- Routing labels (icon, display name, style) shown in the CLI ---
 ROUTE_LABELS = {
     "ANALYSIS": ("📊", "Data Analyst", "bold blue"),
-    "SQL": ("🗄️", "SQL Analyst", "bold blue"),
     "ETL": ("🌐", "ETL Analyst", "bold magenta"),
     "GENERAL": ("🧠", "General Assistant", "bold green"),
 }
 
-ROUTER_SYSTEM_PROMPT = """You are the Master Router of a Data Engineering Team.
-You manage specialist agents plus can answer general questions yourself:
+ROUTER_SYSTEM_PROMPT = """You are the Master Router of an Enterprise Analytics system.
+You direct questions to the proper path:
 
-1. ANALYSIS — ANY question about internal data, metrics, trends, comparisons, or analysis
+1. ANALYSIS — ANY question about internal data, metrics, trends, comparisons, SQL, or analysis
    involving the database (Zomato restaurants, reviews, menu, ratings, sales, orders, users).
-   This includes simple queries AND complex analytical questions (why, trends, comparisons,
-   top/bottom, growth rates, breakdowns).
-2. ETL — pulling/scraping data from external APIs, links, uploaded CSV/Excel, or Pandas-based
-   cleaning/transformation. NOT for querying the internal database.
-3. GENERAL — greetings, small talk, definitions, explanations, brainstorming, or follow-up
-   chat that needs no database and no external data pull.
+   All database queries MUST go to ANALYSIS so they pass through the security guard.
+2. ETL — pulling/scraping data from external APIs, links, or file processing. NOT for database queries.
+3. GENERAL — greetings, small talk, definitions, explanations, general questions that need no database.
 
 Read the recent conversation for context, then classify the LATEST user message.
 Also detect the language/style the user is writing in (Arabic, English, or a natural mix).

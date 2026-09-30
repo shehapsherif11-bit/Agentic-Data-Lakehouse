@@ -22,15 +22,73 @@ from src.tools import pipeline
 _DENYLIST = re.compile(r"\b(import|open|exec|eval|__|os\.|sys\.|subprocess|socket)\b")
 
 
+import ipaddress
+import socket
+from urllib.parse import urlparse
+
+MAX_API_DOWNLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
+
+def _is_safe_url(url: str) -> tuple[bool, str]:
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return False, f"Disallowed scheme '{parsed.scheme}': only HTTP/HTTPS are permitted."
+        
+        hostname = parsed.hostname
+        if not hostname:
+            return False, "Missing hostname in URL."
+            
+        # Resolve hostname to all IP addresses
+        addr_info = socket.getaddrinfo(hostname, None)
+        for family, _, _, _, sockaddr in addr_info:
+            ip_str = sockaddr[0]
+            ip = ipaddress.ip_address(ip_str)
+            if (
+                ip.is_private
+                or ip.is_loopback
+                or ip.is_link_local
+                or ip.is_multicast
+                or ip.is_reserved
+                or ip.is_unspecified
+            ):
+                return False, f"Access to private/internal/metadata IP range ({ip_str}) is blocked (SSRF Protection)."
+        return True, ""
+    except Exception as e:
+        return False, f"Invalid or unresolvable URL: {e}"
+
+
 @tool
 def extract_from_api(url: str, output_path: str) -> str:
-    """Extracts JSON data from a structured API URL and saves it as CSV."""
+    """Extracts JSON data from a structured API URL and saves it as CSV.
+    Protected against SSRF, size limits, and path traversal."""
     try:
-        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        # 1. SSRF Validation
+        is_safe, reason = _is_safe_url(url)
+        if not is_safe:
+            return f"ERROR: Security violation: {reason}"
+
+        # 2. Path Traversal Validation
+        clean_path = os.path.normpath(output_path)
+        if clean_path.startswith("..") or os.path.isabs(clean_path):
+            base_dir = os.path.abspath(".")
+            resolved = os.path.abspath(clean_path)
+            if not resolved.startswith(base_dir):
+                return "ERROR: Path traversal detected: output_path must be within the project directory."
+
+        os.makedirs(os.path.dirname(clean_path) or ".", exist_ok=True)
         headers = {"User-Agent": "Mozilla/5.0"}
-        res = requests.get(url, headers=headers, timeout=15)
-        res.raise_for_status()
-        data = res.json()
+        
+        # 3. Timeout and Size Limits
+        with requests.get(url, headers=headers, timeout=10, stream=True) as res:
+            res.raise_for_status()
+            content = bytearray()
+            for chunk in res.iter_content(chunk_size=65536):
+                content.extend(chunk)
+                if len(content) > MAX_API_DOWNLOAD_BYTES:
+                    return f"ERROR: Response exceeded maximum allowed size of {MAX_API_DOWNLOAD_BYTES // (1024*1024)}MB."
+            
+            import json
+            data = json.loads(content.decode("utf-8"))
 
         if isinstance(data, dict):
             if "results" in data:
@@ -42,8 +100,8 @@ def extract_from_api(url: str, output_path: str) -> str:
         else:
             df = pd.json_normalize(data)
 
-        df.to_csv(output_path, index=False, encoding="utf-8-sig")
-        return f"SUCCESS: API data saved to {output_path} ({len(df)} rows)."
+        df.to_csv(clean_path, index=False, encoding="utf-8-sig")
+        return f"SUCCESS: API data saved to {clean_path} ({len(df)} rows)."
     except Exception as e:
         return f"ERROR extracting API data: {e}"
 

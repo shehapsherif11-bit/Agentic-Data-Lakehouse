@@ -68,12 +68,6 @@ if not logger.handlers:
 # take down the whole router at startup.
 # ==========================================
 try:
-    from src.agent.sql_agent import sql_analyst_agent
-except Exception as e:  # noqa: BLE001 - deliberately broad; this is a best-effort import
-    sql_analyst_agent = None
-    logger.warning("SQL agent unavailable at import time: %s", e)
-
-try:
     # Note: the ETL agent module (see etl_agent.py in the ETL project rewrite)
     # exposes its system prompt as `SYSTEM_PROMPT` (module-level constant,
     # uppercase). If you're wiring this against the original etl_agent.py,
@@ -116,11 +110,10 @@ polish_llm = _make_llm(cfg.GENERAL_MODEL, cfg.POLISH_TEMPERATURE)
 
 
 class RouteDecision(BaseModel):
-    agent: Literal["ANALYSIS", "SQL", "ETL", "GENERAL"] = Field(
+    agent: Literal["ANALYSIS", "ETL", "GENERAL"] = Field(
         description=(
-            "ANALYSIS: any question about internal data, metrics, trends, comparisons, "
-            "or analysis involving the database (Zomato). "
-            "SQL: direct database queries (legacy fallback — prefer ANALYSIS). "
+            "ANALYSIS: any question about internal data, metrics, trends, comparisons, SQL, "
+            "or analysis involving the database (Zomato). Every database query MUST route here. "
             "ETL: pulling/scraping data from external APIs, links, uploaded files, "
             "or Pandas-based cleaning/transformation. "
             "GENERAL: greetings, small talk, definitions, explanations, brainstorming, "
@@ -287,32 +280,17 @@ def analysis_node(state: AgentState) -> dict:
         return {"final_answer": error_msg, "messages": [AIMessage(content=error_msg)]}
 
 
-def sql_node(state: AgentState) -> dict:
-    if sql_analyst_agent is None:
-        logger.error("sql_node called but the SQL agent failed to import.")
-        return {"raw_answer": "[SQL agent is unavailable: it failed to load at startup — check the logs.]"}
-
-    question = state["messages"][-1].content
-    history = _recent_context(state["messages"], cfg.SUBAGENT_HISTORY_MESSAGES, exclude_last=True)
-    contextualized = (
-        f"Context of our conversation:\n{history}\n\nBased on the context, please answer this: {question}"
-        if history else question
-    )
-
-    @_retrying("SQL agent")
-    def _call():
-        result = sql_analyst_agent.invoke({"messages": [HumanMessage(content=contextualized)]})
-        return result.get("final_answer", "No answer generated.")
-
-    try:
-        answer = _call()
-    except Exception as e:
-        logger.error("SQL agent failed: %s", e)
-        answer = f"[SQL agent error: {e}]"
-    return {"raw_answer": answer}
-
-
 def etl_node(state: AgentState) -> dict:
+    lang = state.get("language", "en")
+    if not getattr(cfg, "ENABLE_ETL_AGENT", False):
+        logger.warning("ETL route requested but ENABLE_ETL_AGENT is false.")
+        msg = (
+            "عذراً، مسار استخراج البيانات الخارجية (ETL) معطل حالياً لأسباب أمنية."
+            if lang == "ar"
+            else "ETL and external data extraction features are currently disabled for security reasons."
+        )
+        return {"raw_answer": msg}
+
     if etl_analyst_agent is None:
         logger.error("etl_node called but the ETL agent failed to import.")
         return {"raw_answer": "[ETL agent is unavailable: it failed to load at startup — check the logs.]"}
@@ -435,7 +413,6 @@ def build_graph(checkpointer=None):
 
     graph.add_node("router", router_node)
     graph.add_node("analysis", analysis_node)
-    graph.add_node("sql", sql_node)
     graph.add_node("etl", etl_node)
     graph.add_node("general", general_node)
     graph.add_node("polish", polish_node)
@@ -443,14 +420,12 @@ def build_graph(checkpointer=None):
     graph.set_entry_point("router")
     graph.add_conditional_edges("router", route_decision, {
         "ANALYSIS": "analysis",
-        "SQL": "sql",
         "ETL": "etl",
         "GENERAL": "general",
     })
     # ANALYSIS → END directly (the analyst pipeline generates its own final answer + viz)
     graph.add_edge("analysis", END)
-    # Legacy SQL + ETL still go through polish
-    graph.add_edge("sql", "polish")
+    # ETL goes through polish
     graph.add_edge("etl", "polish")
     graph.add_edge("polish", END)
     graph.add_edge("general", END)
