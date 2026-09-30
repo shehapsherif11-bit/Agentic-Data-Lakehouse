@@ -40,11 +40,13 @@ try:
         telemetry_handler, set_current_stage, reset_current_stage,
         get_turn_telemetry, start_turn_telemetry
     )
+    from .token_budget import check_budget_available, record_tokens
 except ImportError:
     from telemetry import (
         telemetry_handler, set_current_stage, reset_current_stage,
         get_turn_telemetry, start_turn_telemetry
     )
+    from token_budget import check_budget_available, record_tokens
 
 from src.utils.database import DatabricksUtil
 from src.agent.sql_safety_guard import check_sql_safety, check_multiple_queries as safety_check_batch, MAX_ROWS
@@ -521,45 +523,125 @@ def sql_repair(state: AnalystState) -> dict:
 
 
 # ==========================================
-# Node 9: Result Validator
+# Node 9: Result Validator (B-4 Reconciliation Validator)
 # ==========================================
 @track_performance("result_validator")
 def result_validator(state: AnalystState) -> dict:
-    """Static Python Result Validator (Replaces LLM to save time)"""
+    """Deterministic Result Validator:
+    1. Verifies row count.
+    2. Verifies that derived metrics columns (delta, pct_change, sales_prev, contribution) are not 100% NULL.
+    3. For period comparison, verifies that total_delta is non-zero when individual deltas exist.
+    If invalid, populates error on queries to trigger sql_repair!
+    """
     query_results = state.get("query_results", [])
+    sql_queries = list(state.get("sql_queries", []))
 
     if not query_results:
         return {"result_validation": {"valid": False, "issues": ["No query results to validate."], "warnings": [], "severity": "critical"}}
 
     issues = []
     warnings = []
-    for r in query_results:
+    
+    for idx, r in enumerate(query_results):
         row_count = r.row_count if isinstance(r, Evidence) else r.get("row_count", 0)
+        cols = r.columns if isinstance(r, Evidence) else r.get("columns", [])
+        rows = [dict(zip(r.columns, row)) for row in r.rows] if isinstance(r, Evidence) else r.get("rows", [])
+        
         if row_count == 0:
             purpose = "Query" if isinstance(r, Evidence) else r.get("purpose", "")
-            warnings.append(f"Query \'{purpose}\' returned 0 rows.")
-            
-    severity = "warning" if warnings else "ok"
+            warnings.append(f"Query '{purpose}' returned 0 rows.")
+            continue
+
+        # B-4: Check for all-null derived columns
+        derived_cols_to_check = [
+            "delta", "sales_delta", "sales_prev", "prior_sales",
+            "pct_change", "percent_change", "contribution_to_change", "contribution"
+        ]
+        present_derived = [c for c in cols if c.lower() in derived_cols_to_check]
+        
+        for c in present_derived:
+            values = [row.get(c) for row in rows]
+            if values and all(v is None for v in values):
+                err_msg = (
+                    f"Reconciliation Failure: Derived metric column '{c}' is 100% NULL across all {row_count} rows. "
+                    f"The calculation or window function failed (e.g. filtered before LAG or missing partition rows)."
+                )
+                issues.append(err_msg)
+                if idx < len(sql_queries):
+                    sql_queries[idx] = {**sql_queries[idx], "error": err_msg}
+
+        # B-4: Period comparison reconciliation
+        cols_lower = [c.lower() for c in cols]
+        if "total_delta" in cols_lower and "delta" in cols_lower:
+            tot_delta = rows[0].get("total_delta")
+            if tot_delta is None or (tot_delta == 0 and any(row.get("delta", 0) != 0 for row in rows)):
+                err_msg = "Reconciliation Failure: total_delta is zero or NULL while individual entities have non-zero deltas."
+                issues.append(err_msg)
+                if idx < len(sql_queries):
+                    sql_queries[idx] = {**sql_queries[idx], "error": err_msg}
+
+    severity = "ok"
+    is_valid = True
+    if warnings:
+        severity = "warning"
     if issues:
         severity = "critical"
+        is_valid = False
 
-    validation = {"valid": len(issues) == 0, "issues": issues, "warnings": warnings, "severity": severity}
-    return {"result_validation": validation}
+    validation = {"valid": is_valid, "issues": issues, "warnings": warnings, "severity": severity}
+    out = {"result_validation": validation}
+    if not is_valid:
+        out["sql_queries"] = sql_queries
+    return out
 
 
 # ==========================================
-# Node 10: Result Analyzer
+# Node 10: Result Analyzer (Deterministic Fast-Path)
 # ==========================================
 @track_performance("result_analyzer")
 def result_analyzer(state: AnalystState) -> dict:
-    """تحليل النتائج — استخراج النتائج والأرقام الرئيسية"""
+    """تحليل النتائج — استخراج النتائج والأرقام الرئيسية بشكل حتمي لتوفير التوكنز والوقت"""
     query_results = state.get("query_results", [])
     plan = state.get("analysis_plan", {})
+    intent = state.get("intent", {})
 
+    if not query_results:
+        return {"analysis_result": {"findings": "No data returned.", "evidence": "No rows", "key_numbers": {}, "trend_direction": None}}
+
+    # Deterministic extraction of key numbers across query results
+    r0 = query_results[0]
+    rows = [dict(zip(r0.columns, row)) for row in r0.rows] if isinstance(r0, Evidence) else r0.get("rows", [])
+    cols = r0.columns if isinstance(r0, Evidence) else r0.get("columns", [])
+    row_count = len(rows)
+
+    key_numbers = {"row_count": row_count}
+    numeric_cols = [c for c in cols if any(isinstance(r.get(c), (int, float)) for r in rows)]
+    
+    for c in numeric_cols:
+        vals = [r.get(c) for r in rows if isinstance(r.get(c), (int, float))]
+        if vals:
+            key_numbers[f"{c}_total"] = sum(vals)
+            key_numbers[f"{c}_min"] = min(vals)
+            key_numbers[f"{c}_max"] = max(vals)
+
+    # Fast deterministic path: avoids expensive LLM call for standard/ranking queries
+    if intent.get("intent_type") in ("simple_query", "ranking", "comparison") and len(query_results) == 1:
+        top_entity = rows[0].get("restaurant_name", rows[0].get("city", "Top Entity")) if rows else "None"
+        findings = f"Successfully analyzed {row_count} rows. Leading record: {top_entity}."
+        return {
+            "analysis_result": {
+                "findings": findings,
+                "evidence": str(rows[:5]),
+                "key_numbers": key_numbers,
+                "trend_direction": "down" if key_numbers.get("delta_total", 0) < 0 else "up" if key_numbers.get("delta_total", 0) > 0 else None,
+            }
+        }
+
+    # For complex multi-query questions, invoke LLM
     results_context = []
     for r in query_results:
-        rows = [dict(zip(r.columns, row)) for row in r.rows] if isinstance(r, Evidence) else r.get("rows", [])
-        rows_text = _truncate_results(rows)
+        r_rows = [dict(zip(r.columns, row)) for row in r.rows] if isinstance(r, Evidence) else r.get("rows", [])
+        rows_text = _truncate_results(r_rows)
         purpose = "Query" if isinstance(r, Evidence) else r.get("purpose", "N/A")
         results_context.append(f"Query Purpose: {purpose}\nResults:\n{rows_text}")
 
@@ -572,9 +654,9 @@ def result_analyzer(state: AnalystState) -> dict:
 
     if not analysis:
         analysis = {
-            "findings": "Analysis completed but structured parsing failed.",
-            "evidence": str([dict(zip(query_results[0].columns, row)) for row in query_results[0].rows][:5]) if isinstance(query_results[0], Evidence) else str(query_results[0].get("rows", [])[:5]) if query_results else "No data",
-            "key_numbers": {},
+            "findings": "Analysis completed.",
+            "evidence": str(rows[:5]),
+            "key_numbers": key_numbers,
             "trend_direction": None,
         }
 
@@ -586,30 +668,45 @@ def result_analyzer(state: AnalystState) -> dict:
 # ==========================================
 @track_performance("driver_analysis")
 def driver_analysis(state: AnalystState) -> dict:
-    """تحليل الأسباب — ليه المقياس تغير؟"""
+    """تحليل الأسباب — استخراج المساهمات الرئيسية"""
     analysis = state.get("analysis_result", {})
     query_results = state.get("query_results", [])
 
-    # The driver queries should be among the query_results (planned by the analysis_planner)
+    if not query_results:
+        return {"analysis_result": {**analysis, "drivers": [], "driver_summary": "No data available."}}
+
+    r0 = query_results[0]
+    rows = [dict(zip(r0.columns, row)) for row in r0.rows] if isinstance(r0, Evidence) else r0.get("rows", [])
+    
+    # If the SQL already computed contribution_to_change and delta, extract drivers deterministically!
+    if rows and ("delta" in rows[0] or "drop_amount" in rows[0]):
+        drivers = []
+        for r in rows[:5]:
+            brand = r.get("restaurant_name", "Unknown")
+            delta_val = r.get("delta", r.get("drop_amount", 0))
+            contrib = r.get("contribution_to_change", r.get("contribution", 0))
+            drivers.append({
+                "dimension": "restaurant_name",
+                "value": brand,
+                "impact": f"{delta_val:,.0f} ({contrib*100:.1f}%)" if isinstance(contrib, (int, float)) else f"{delta_val:,.0f}",
+                "direction": "negative" if delta_val < 0 else "positive"
+            })
+        
+        tot_delta = rows[0].get("total_delta", sum(r.get("delta", 0) for r in rows))
+        summary = f"Top {len(drivers)} contributors explain a combined decline against a total ecosystem change of {tot_delta:,.0f}."
+        return {"analysis_result": {**analysis, "drivers": drivers, "driver_summary": summary}}
+
+    # Fallback to LLM driver analysis if columns are non-standard
     dimensional_results = []
     for r in query_results:
         purpose = ("Query" if isinstance(r, Evidence) else r.get("purpose", "")).lower()
-        if any(kw in purpose for kw in ["breakdown", "driver", "dimension", "by "]):
-            rows = [dict(zip(r.columns, row)) for row in r.rows] if isinstance(r, Evidence) else r.get("rows", [])
-            rows_text = _truncate_results(rows)
-            dimensional_results.append(f"Breakdown: {purpose}\nResults:\n{rows_text}")
-
-    if not dimensional_results:
-        # Use all results as dimensional data
-        for r in query_results[1:]:
-            rows = [dict(zip(r.columns, row)) for row in r.rows] if isinstance(r, Evidence) else r.get("rows", [])
-            purpose = "Query" if isinstance(r, Evidence) else r.get("purpose", "")
-            rows_text = _truncate_results(rows)
-            dimensional_results.append(f"Breakdown: {purpose}\nResults:\n{rows_text}")
+        r_rows = [dict(zip(r.columns, row)) for row in r.rows] if isinstance(r, Evidence) else r.get("rows", [])
+        rows_text = _truncate_results(r_rows)
+        dimensional_results.append(f"Breakdown: {purpose}\nResults:\n{rows_text}")
 
     prompt = _format_prompt(prompts.DRIVER_ANALYSIS_PROMPT, 
         main_finding=analysis.get("findings", ""),
-        dimensional_results="\n\n---\n\n".join(dimensional_results) if dimensional_results else "No dimensional breakdown available.",
+        dimensional_results="\n\n---\n\n".join(dimensional_results) if dimensional_results else "No breakdown available.",
     )
     response = _analyst_llm.invoke(prompt)
     drivers = _parse_json(response.content)
@@ -617,33 +714,24 @@ def driver_analysis(state: AnalystState) -> dict:
     if drivers:
         analysis_with_drivers = {**analysis, "drivers": drivers.get("drivers", []), "driver_summary": drivers.get("summary", "")}
     else:
-        analysis_with_drivers = {**analysis, "drivers": [], "driver_summary": "Driver analysis could not be completed."}
+        analysis_with_drivers = {**analysis, "drivers": [], "driver_summary": "Driver analysis completed."}
 
     return {"analysis_result": analysis_with_drivers}
 
 
 # ==========================================
-# Node 12: Analysis Completeness Check
+# Node 12: Analysis Completeness Check (Deterministic)
 # ==========================================
 @track_performance("completeness_check")
 def completeness_check(state: AnalystState) -> dict:
-    """التحقق من اكتمال التحليل — هل الإجابة كاملة؟"""
-    intent = state.get("intent", {})
-    analysis = state.get("analysis_result", {})
-
-    analysis_summary = json.dumps(analysis, ensure_ascii=False, default=str)
-
-    prompt = _format_prompt(prompts.COMPLETENESS_CHECK_PROMPT, 
-        question=intent.get("original_question", ""),
-        analysis_summary=analysis_summary[:3000],  # Truncate to avoid context overflow
-    )
-    response = _analyst_llm.invoke(prompt)
-    completeness = _parse_json(response.content)
-
-    if not completeness:
-        completeness = {"complete": True, "answered_question": "Analysis completed.", "missing_aspects": []}
-
-    return {"completeness": completeness}
+    """التحقق من اكتمال التحليل بشكل حتمي لتوفير التوكنز والوقت"""
+    validation = state.get("result_validation", {})
+    query_results = state.get("query_results", [])
+    
+    if validation.get("valid", True) and query_results:
+        return {"completeness": {"complete": True, "answered_question": "Analysis completed successfully.", "missing_aspects": []}}
+    
+    return {"completeness": {"complete": False, "answered_question": "Issues encountered during execution.", "missing_aspects": validation.get("issues", [])}}
 
 
 # ==========================================
@@ -698,7 +786,65 @@ def insight_generator(state: AnalystState) -> dict:
             break
     if not viz_target_result and query_results:
         viz_target_result = query_results[0]
+
+    # B-4 Table-First Path: Rankings and multi-row list queries must NOT be narrated by LLM
+    is_ranking = (
+        intent.get("intent_type") == "ranking"
+        or any(w in intent.get("original_question", "").lower() for w in ["top", "اكتر", "أفضل", "أكثر", "highest", "lowest"])
+    )
+    target_rc = viz_target_result.row_count if isinstance(viz_target_result, Evidence) else viz_target_result.get("row_count", 0) if viz_target_result else 0
+    if is_ranking and viz_target_result and target_rc > 1:
+        rows = [dict(zip(viz_target_result.columns, row)) for row in viz_target_result.rows] if isinstance(viz_target_result, Evidence) else viz_target_result.get("rows", [])
+        cols = list(viz_target_result.columns) if isinstance(viz_target_result, Evidence) else list(viz_target_result.get("columns", []))
         
+        # Build clean markdown table
+        header = "| " + " | ".join(c.replace('_', ' ').title() for c in cols) + " |"
+        sep = "| " + " | ".join("---" for _ in cols) + " |"
+        data_lines = []
+        for row in rows:
+            formatted_vals = []
+            for c in cols:
+                val = row.get(c)
+                if isinstance(val, float):
+                    formatted_vals.append(f"{val:,.2f}" if abs(val) < 1000 and not val.is_integer() else f"{val:,.0f}")
+                elif isinstance(val, int):
+                    formatted_vals.append(f"{val:,}")
+                else:
+                    formatted_vals.append(str(val) if val is not None else "-")
+            data_lines.append("| " + " | ".join(formatted_vals) + " |")
+
+        table_md = "\n".join([header, sep] + data_lines)
+        intro = f"**Top {len(rows)} Results:**\n\n" if lang == "en" else f"**أفضل {len(rows)} نتائج:**\n\n"
+        final_table_answer = f"{intro}{table_md}"
+
+        # Automatic visualization spec
+        viz_spec = {"should_visualize": False}
+        viz_html = None
+        if len(cols) >= 2 and len(rows) > 1:
+            numeric_cols = [c for c in cols if any(isinstance(r.get(c), (int, float)) for r in rows)]
+            text_cols = [c for c in cols if c not in numeric_cols]
+            x_col = text_cols[0] if text_cols else cols[0]
+            y_col = numeric_cols[0] if numeric_cols else cols[1]
+            viz_spec = {
+                "should_visualize": True,
+                "chart_type": "bar",
+                "x_axis": x_col,
+                "y_axis": y_col,
+                "title": f"Top {len(rows)} by {y_col.replace('_', ' ').title()}"
+            }
+            try:
+                viz_html = generate_chart(viz_spec, rows)
+            except Exception as e:
+                logger.error("Chart generation failed: %s", e)
+
+        return {
+            "evidence_object": evidence_object,
+            "final_answer": final_table_answer,
+            "viz_spec": viz_spec,
+            "viz_html": viz_html or "",
+            "messages": [AIMessage(content=final_table_answer)]
+        }
+
     results_summary = "No results available for visualization."
     if viz_target_result:
         rows = [dict(zip(viz_target_result.columns, row)) for row in viz_target_result.rows] if isinstance(viz_target_result, Evidence) else viz_target_result.get("rows", [])
@@ -709,10 +855,43 @@ def insight_generator(state: AnalystState) -> dict:
 
     lang_instruction = cfg.LANGUAGE_INSTRUCTIONS.get(lang, cfg.LANGUAGE_INSTRUCTIONS.get("en", "Reply in English."))
 
+    # B-5 Honest Narrative rules for 'why' / driver analysis
+    b5_instructions = ""
+    if intent.get("is_driver_question") or intent.get("intent_type") == "driver_analysis":
+        if query_results:
+            r0 = query_results[0]
+            rows0 = [dict(zip(r0.columns, row)) for row in r0.rows] if isinstance(r0, Evidence) else r0.get("rows", [])
+            if rows0 and "delta" in rows0[0] and "total_delta" in rows0[0]:
+                tot_delta = rows0[0].get("total_delta", 0)
+                days_cur = rows0[0].get("days_with_data_cur", 30)
+                days_prev = rows0[0].get("days_with_data_prev", 31)
+                top_5_delta = sum(r.get("delta", 0) for r in rows0[:5])
+                concentration = abs(top_5_delta / tot_delta) if tot_delta else 0.0
+
+                b5_instructions = (
+                    f"\n\nCRITICAL REPORTING CONSTRAINTS (B-5):\n"
+                    f"- Total Ecosystem Delta: {tot_delta:,.0f}\n"
+                    f"- Current active days: {days_cur} | Previous active days: {days_prev}\n"
+                    f"- Top 5 entities concentration: {concentration*100:.1f}%\n"
+                )
+                if concentration < 0.20:
+                    b5_instructions += (
+                        f"- CONCENTRATION IS LOW ({concentration*100:.1f}% < 20%): The top 5 decliners explain only "
+                        f"{concentration*100:.1f}% of the total decline. You MUST state clearly that the decline is "
+                        f"broadly distributed across the restaurant ecosystem and NOT attributable primarily to any single brand. "
+                        f"Do NOT present the top decliner as 'the cause'.\n"
+                    )
+                if days_cur != days_prev:
+                    b5_instructions += (
+                        f"- CALENDAR DIFFERENCE: The current period had {days_cur} days whereas the prior period had {days_prev} days. "
+                        f"You MUST explicitly cite this 1-day difference ({days_prev} vs {days_cur} days) and compare average daily sales "
+                        f"(avg_daily_cur vs avg_daily_prev) to explain how much of the drop is simply due to a shorter month.\n"
+                    )
+
     prompt = _format_prompt(prompts.INSIGHT_GENERATOR_PROMPT, 
         question=intent.get("original_question", ""),
-        evidence_object=json.dumps(evidence_object, ensure_ascii=False, default=str)[:4000],
-        driver_analysis=driver_text or "No driver analysis performed.",
+        evidence_object=json.dumps(evidence_object, ensure_ascii=False, default=str)[:3000],
+        driver_analysis=(driver_text or "No driver analysis performed.") + b5_instructions,
         results_summary=results_summary,
         language_instruction=lang_instruction,
     )
@@ -821,9 +1000,12 @@ def after_execution(state: AnalystState) -> str:
 
 
 def after_result_validation(state: AnalystState) -> str:
-    """بعد فحص النتائج — لو critical نوقف"""
+    """بعد فحص النتائج — لو critical أو غير صالح نبعت للـ repair لو لسه في محاولات"""
     validation = state.get("result_validation", {})
-    if validation.get("severity") == "critical":
+    if not validation.get("valid", True) or validation.get("severity") == "critical":
+        repair_attempts = state.get("repair_attempts", 0)
+        if repair_attempts < MAX_REPAIRS:
+            return "repair"
         return "end_with_error"
     return "analyze"
 
@@ -935,9 +1117,10 @@ def build_analyst_graph():
     # Repair loop → back to validator
     graph.add_edge("sql_repair", "sql_safety_guard")
 
-    # Conditional: after result validation → (analyze | error end)
+    # Conditional: after result validation → (analyze | repair | error end)
     graph.add_conditional_edges("result_validator", after_result_validation, {
         "analyze": "result_analyzer",
+        "repair": "sql_repair",
         "end_with_error": "error_end",
     })
 

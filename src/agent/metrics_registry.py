@@ -44,7 +44,7 @@ TABLE_GRAINS = {
     },
     "workspace.zomato_gold.dim_resturant": {
         "alias": "dr",
-        "grain": "one row per restaurant",
+        "grain": "one row per restaurant branch (pk: restaurant_id). Note: multiple branches share the same restaurant_name (Brand level). To analyze by restaurant/brand, ALWAYS group by restaurant_name.",
         "pk": "restaurant_id",
         "relationships": {}
     },
@@ -202,7 +202,7 @@ METRICS = {
         "source_table": None,
         "description": "Profit (Revenue - Cost)",
         "aggregation_type": "CALCULATION",
-        "missing_reason": "needs cost/COGS data - missing"
+        "missing_reason": "needs cost/COGS data - missing. Available alternatives: revenue (sales_amount), total_orders, average order value (AOV), and discount_rate."
     },
     "profit_margin": {
         "display_name": "Profit Margin",
@@ -211,7 +211,7 @@ METRICS = {
         "source_table": None,
         "description": "Profit margin percentage",
         "aggregation_type": "CALCULATION",
-        "missing_reason": "needs cost data - missing"
+        "missing_reason": "needs cost data - missing. Available alternatives: revenue, total_orders, average order value (AOV), and discount_rate."
     },
     "conversion_rate": {
         "display_name": "Conversion Rate",
@@ -280,15 +280,46 @@ def resolve_metric(metric_name: str) -> dict:
         "number of orders": "total_orders",
         "customers": "total_customers",
         "average rating": "avg_rating",
-        "order count": "total_orders"
+        "order count": "total_orders",
+        "sales change": "revenue",
+        "sales_change": "revenue",
+        "sales decline": "revenue",
+        "sales_decline": "revenue",
+        "sales drop": "revenue",
+        "sales_drop": "revenue",
+        "sales growth": "revenue",
+        "sales_growth": "revenue",
+        "revenue change": "revenue",
+        "revenue_change": "revenue",
+        "revenue decline": "revenue",
+        "revenue_decline": "revenue",
+        "revenue drop": "revenue",
+        "revenue_drop": "revenue",
+        "contribution": "revenue",
+        "contribution_to_change": "revenue",
+        "contribution to change": "revenue",
+        "contribution share": "revenue",
+        "contribution_share": "revenue",
+        "restaurant contribution": "revenue",
+        "restaurant_contribution": "revenue",
+        "order change": "total_orders",
+        "order decline": "total_orders",
+        "order drop": "total_orders",
+        "order growth": "total_orders",
     }
     
     # Try exact, clean, or direct aliases
-    resolved_name = aliases.get(name_clean, name_lower)
+    resolved_name = aliases.get(name_clean, aliases.get(name_lower, name_lower))
     
-    # also try direct match in aliases for the raw name_lower
-    if name_lower in aliases:
-        resolved_name = aliases[name_lower]
+    # Strip common analytical suffixes if still unresolved
+    if resolved_name not in METRICS:
+        import re
+        stripped = re.sub(r'_(change|decline|drop|growth|difference|delta|loss|contribution)$', '', name_lower)
+        stripped = re.sub(r'^(contribution_to_|restaurant_)', '', stripped)
+        if stripped in aliases:
+            resolved_name = aliases[stripped]
+        elif stripped in METRICS:
+            resolved_name = stripped
     
     # Check directly first
     if resolved_name in METRICS:
@@ -346,16 +377,23 @@ def check_data_sufficiency(required_metrics: list[str], required_dimensions: lis
     missing = []
     warnings = []
     
+    all_cols = []
+    for table, cols in COLUMN_CATALOG.items():
+        all_cols.extend([c.lower() for c in cols.keys()])
+
     for metric in required_metrics:
         resolved = resolve_metric(metric)
         if resolved["status"] in ("missing", "complex"):
-            missing.append({"name": metric, "reason": resolved["missing_reason"]})
+            if metric.lower() in all_cols:
+                warnings.append(f"Note: '{metric}' was requested as a metric but it is actually a column/dimension. Proceeding.")
+            elif metric.lower() == "years" or metric.lower() == "age": # Hardcode common mistakes
+                warnings.append(f"Note: '{metric}' is a dimension, not a metric. Proceeding.")
+            else:
+                missing.append({"name": metric, "reason": resolved["missing_reason"]})
         else:
             available.append(metric)
             
-    all_cols = []
-    for table, cols in COLUMN_CATALOG.items():
-        all_cols.extend(cols.keys())
+    # (all_cols was already populated above)
         
     for dim in required_dimensions:
         if dim.lower() not in all_cols:
@@ -401,4 +439,39 @@ def get_schema_context_for_llm() -> str:
         cols_str = ", ".join([f"{c}({t})" for c, t in columns.items()])
         context += f"Columns: {cols_str}\n\n"
         
+    return context.strip()
+
+def get_lean_schema_context_for_llm(relevant_tables: list[str] = None) -> str:
+    """Builds a token-efficient schema context including only relevant tables.
+    If relevant_tables is omitted, includes core tables (fact_orders, dim_resturant, dim_date)."""
+    if not relevant_tables:
+        target_tables = [
+            "workspace.zomato_gold.fact_orders",
+            "workspace.zomato_gold.dim_resturant",
+            "workspace.zomato_gold.dim_date"
+        ]
+    else:
+        target_tables = []
+        for t in relevant_tables:
+            full_t = t if "workspace.zomato_gold" in t else f"workspace.zomato_gold.{t}"
+            if full_t in TABLE_GRAINS:
+                target_tables.append(full_t)
+        if not target_tables:
+            target_tables = [
+                "workspace.zomato_gold.fact_orders",
+                "workspace.zomato_gold.dim_resturant",
+                "workspace.zomato_gold.dim_date"
+            ]
+
+    context = "Database Schema Reference (workspace.zomato_gold):\n\n"
+    for table in target_tables:
+        grain_info = TABLE_GRAINS.get(table)
+        if not grain_info:
+            continue
+        context += f"Table: {table} (Alias: {grain_info['alias']})\n"
+        context += f"Grain: {grain_info['grain']} | PK: {grain_info['pk']}\n"
+        columns = COLUMN_CATALOG.get(table, {})
+        cols_str = ", ".join([f"{c}({t})" for c, t in columns.items()])
+        context += f"Columns: {cols_str}\n\n"
+
     return context.strip()

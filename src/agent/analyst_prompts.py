@@ -145,41 +145,60 @@ RULES:
     - When querying or grouping by restaurant (e.g. 'top restaurants', 'which restaurant contributed most to sales decline', 'sales by restaurant'), you MUST `GROUP BY dr.restaurant_name` (Brand level).
     - NEVER group by `dr.restaurant_id` unless the user explicitly requested 'branches', 'outlets', or 'locations'.
     - To measure restaurant contribution across multiple branches, aggregate by `dr.restaurant_name`.
-11. TEMPORAL DECLINE / DRIVER CTE PATTERN (FOLLOW THIS):
-    - When asked "Why did sales decline?" or "Which restaurant contributed most to the decline?":
-    - Use this exact CTE structure (joining recent_months instead of subqueries):
-      WITH recent_months AS (
-          SELECT DISTINCT dd.year, dd.month_number
-          FROM workspace.zomato_gold.dim_date dd
-          JOIN workspace.zomato_gold.fact_orders fo ON dd.date_id = fo.date_id
-          ORDER BY dd.year DESC, dd.month_number DESC
-          LIMIT 2
+11. PERIOD COMPARISON / DECLINE DRIVER PATTERN (CRITICAL - FOLLOW THIS PATTERN):
+    - When asked "Why did sales decline?", "Which restaurant contributed most to decline?", or comparing periods:
+    - Derive the latest two periods directly from fact_orders (NOT dim_date alone, as dim_date has future dates without orders).
+    - Aggregate both periods in ONE pass using conditional aggregation per brand (`dr.restaurant_name`) with COALESCE(..., 0) so restaurants with zero sales in either period are not dropped.
+    - Compute period totals (total_sales_cur, total_sales_prev, days_with_data_cur, days_with_data_prev, total_delta).
+    - Output: restaurant_name, sales_cur, sales_prev, delta, pct_change, contribution_to_change (delta / total_delta), days_with_data_cur, days_with_data_prev, avg_daily_cur, avg_daily_prev, total_delta.
+    - Structure:
+      WITH period_bounds AS (
+          SELECT dd.year, dd.month_number, COUNT(DISTINCT fo.date_id) as days_in_month,
+                 DENSE_RANK() OVER (ORDER BY dd.year DESC, dd.month_number DESC) as period_rank
+          FROM workspace.zomato_gold.fact_orders fo
+          JOIN workspace.zomato_gold.dim_date dd ON fo.date_id = dd.date_id
+          GROUP BY dd.year, dd.month_number
       ),
-      monthly_brand_sales AS (
+      cur_period AS (SELECT year, month_number, days_in_month FROM period_bounds WHERE period_rank = 1),
+      prev_period AS (SELECT year, month_number, days_in_month FROM period_bounds WHERE period_rank = 2),
+      period_totals AS (
+          SELECT 
+              SUM(CASE WHEN dd.year = cp.year AND dd.month_number = cp.month_number THEN fo.sales_amount ELSE 0 END) AS total_sales_cur,
+              SUM(CASE WHEN dd.year = pp.year AND dd.month_number = pp.month_number THEN fo.sales_amount ELSE 0 END) AS total_sales_prev,
+              MAX(cp.days_in_month) AS days_with_data_cur,
+              MAX(pp.days_in_month) AS days_with_data_prev
+          FROM workspace.zomato_gold.fact_orders fo
+          JOIN workspace.zomato_gold.dim_date dd ON fo.date_id = dd.date_id
+          CROSS JOIN cur_period cp CROSS JOIN prev_period pp
+          WHERE (dd.year = cp.year AND dd.month_number = cp.month_number)
+             OR (dd.year = pp.year AND dd.month_number = pp.month_number)
+      ),
+      brand_aggregation AS (
           SELECT 
               dr.restaurant_name,
-              dd.year,
-              dd.month_number,
-              SUM(fo.sales_amount) as monthly_sales
+              COALESCE(SUM(CASE WHEN dd.year = cp.year AND dd.month_number = cp.month_number THEN fo.sales_amount END), 0) AS sales_cur,
+              COALESCE(SUM(CASE WHEN dd.year = pp.year AND dd.month_number = pp.month_number THEN fo.sales_amount END), 0) AS sales_prev
           FROM workspace.zomato_gold.fact_orders fo
           JOIN workspace.zomato_gold.dim_date dd ON fo.date_id = dd.date_id
           JOIN workspace.zomato_gold.dim_resturant dr ON fo.restaurant_id = dr.restaurant_id
-          JOIN recent_months rm ON dd.year = rm.year AND dd.month_number = rm.month_number
-          GROUP BY dr.restaurant_name, dd.year, dd.month_number
-      ),
-      brand_diffs AS (
-          SELECT 
-              restaurant_name,
-              monthly_sales as current_sales,
-              LAG(monthly_sales) OVER (PARTITION BY restaurant_name ORDER BY year, month_number) as prior_sales,
-              monthly_sales - LAG(monthly_sales) OVER (PARTITION BY restaurant_name ORDER BY year, month_number) as drop_amount
-          FROM monthly_brand_sales
+          CROSS JOIN cur_period cp CROSS JOIN prev_period pp
+          WHERE (dd.year = cp.year AND dd.month_number = cp.month_number)
+             OR (dd.year = pp.year AND dd.month_number = pp.month_number)
+          GROUP BY dr.restaurant_name
       )
-      SELECT restaurant_name, drop_amount, prior_sales, current_sales
-      FROM brand_diffs
-      WHERE drop_amount < 0
-      ORDER BY drop_amount ASC
-      LIMIT 5
+      SELECT 
+          ba.restaurant_name, ba.sales_cur, ba.sales_prev,
+          (ba.sales_cur - ba.sales_prev) AS delta,
+          ROUND(CASE WHEN ba.sales_prev > 0 THEN ((ba.sales_cur - ba.sales_prev) / ba.sales_prev) * 100 ELSE NULL END, 2) AS pct_change,
+          ROUND((ba.sales_cur - ba.sales_prev) / NULLIF((pt.total_sales_cur - pt.total_sales_prev), 0), 4) AS contribution_to_change,
+          pt.days_with_data_cur, pt.days_with_data_prev,
+          ROUND(ba.sales_cur / NULLIF(pt.days_with_data_cur, 0), 2) AS avg_daily_cur,
+          ROUND(ba.sales_prev / NULLIF(pt.days_with_data_prev, 0), 2) AS avg_daily_prev,
+          pt.total_sales_cur, pt.total_sales_prev, (pt.total_sales_cur - pt.total_sales_prev) AS total_delta
+      FROM brand_aggregation ba
+      CROSS JOIN period_totals pt
+      ORDER BY delta ASC
+      LIMIT 10
 12. SINGLE STANDALONE STATEMENT (NO SEMICOLONS):
     - Each query in `queries` MUST be a single valid statement (never concatenate multiple queries with `;`).
     - Use Common Table Expressions (`WITH ... AS (...)`) for all multi-step computations.

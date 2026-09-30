@@ -2,7 +2,7 @@ import os
 import requests
 from typing import Literal
 from dotenv import load_dotenv
-from langchain_groq import ChatGroq
+from src.agent.llm_factory import get_llm
 from langchain_core.messages import SystemMessage, HumanMessage
 from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph, START, END
@@ -41,7 +41,7 @@ def get_working_model():
                 print(f"Testing model: {model_name}...")
                 try:
                     # اختبار فعلي للموديل
-                    test_llm = ChatGroq(model=model_name, temperature=0.0, api_key=GROQ_API_KEY, max_retries=1)
+                    test_llm = get_llm(model_name=model_name, temperature=0.0, max_retries=1)
                     test_llm.invoke("hi")
                     print(f"✅ BINGO! Verified & Working Model: {model_name}")
                     return model_name
@@ -61,10 +61,9 @@ ACTIVE_MODEL = get_working_model()
 # ==========================================
 # 1. إعدادات النماذج
 # ==========================================
-llm = ChatGroq(
-    model=ACTIVE_MODEL,
-    temperature=0.0,
-    api_key=GROQ_API_KEY
+llm = get_llm(
+    model_name=ACTIVE_MODEL,
+    temperature=0.0
 )
 
 class JudgeSchema(BaseModel):

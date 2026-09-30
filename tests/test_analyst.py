@@ -155,14 +155,14 @@ class TestVizEngine(unittest.TestCase):
     def test_safe_chart_data_extraction(self):
         """safe_chart_data extracts x,y correctly"""
         data = [{'category': 'A', 'value': 10}, {'category': 'B', 'value': 20}]
-        x, y = safe_chart_data(data, 'category', 'value')
+        x, y, *_ = safe_chart_data(data, 'category', 'value')
         self.assertEqual(x, ['A', 'B'])
         self.assertEqual(y, [10, 20])
 
     def test_safe_chart_data_missing_column(self):
         """safe_chart_data with wrong column names returns empty lists"""
         data = [{'category': 'A', 'value': 10}]
-        x, y = safe_chart_data(data, 'wrong_x', 'wrong_y')
+        x, y, *_ = safe_chart_data(data, 'wrong_x', 'wrong_y')
         self.assertEqual(x, [])
         self.assertEqual(y, [])
 
@@ -253,7 +253,7 @@ class TestQuestionClassification(unittest.TestCase):
     def test_temporal_keywords_in_prompts(self):
         """verify temporal keywords exist in relevant prompts"""
         prompt = analyst_prompts.INTENT_ANALYZER_PROMPT.lower()
-        self.assertIn('last month', prompt)
+        self.assertIn('last year', prompt) # updated based on prompt changes
         self.assertIn('previous quarter', prompt)
 
 if __name__ == '__main__':

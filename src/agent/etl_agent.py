@@ -20,7 +20,7 @@ ReAct ETL agent. Compared to the previous version:
 import logging
 
 from langchain_core.messages import SystemMessage, HumanMessage
-from langchain_groq import ChatGroq
+from src.agent.llm_factory import get_llm
 from langgraph.prebuilt import create_react_agent
 
 from src.tools import config
@@ -32,7 +32,7 @@ logger = logging.getLogger("etl.agent")
 ACTIVE_MODEL = config.get_active_groq_model()
 logger.info("ETL agent using Groq model: %s", ACTIVE_MODEL)
 
-llm = ChatGroq(model=ACTIVE_MODEL, temperature=0.0, api_key=config.GROQ_API_KEY)
+llm = get_llm(model_name=ACTIVE_MODEL, temperature=0.0)
 
 system_prompt = """You are a Senior ETL Data Engineer. Your job is to extract data from APIs or
 websites and save it in a clean, structured, professional format.
