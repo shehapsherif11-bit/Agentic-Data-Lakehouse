@@ -1,7 +1,0 @@
--  .\venv\Scripts\activate
-
--  cd zomato_dbt
-
--  $env:PYTHONUTF8=1
-
--  dbt debug
