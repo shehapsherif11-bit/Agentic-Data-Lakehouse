@@ -32,7 +32,7 @@ from typing import Annotated, Literal, Sequence, TypedDict
 from pydantic import BaseModel, Field
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from langchain_groq import ChatGroq
+from src.agent.llm_factory import get_llm
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
@@ -91,17 +91,23 @@ except Exception as e:  # noqa: BLE001
     logger.warning("Analyst agent unavailable at import time: %s", e)
 
 
+try:
+    from .telemetry import (
+        telemetry_handler, set_current_stage, reset_current_stage,
+        start_turn_telemetry, get_turn_telemetry
+    )
+except ImportError:
+    from telemetry import (
+        telemetry_handler, set_current_stage, reset_current_stage,
+        start_turn_telemetry, get_turn_telemetry
+    )
+
 # ==========================================
 # LLMs
 # ==========================================
-def _make_llm(model: str, temperature: float) -> ChatGroq:
-    return ChatGroq(
-        model=model,
-        temperature=temperature,
-        api_key=cfg.GROQ_API_KEY,
-        request_timeout=cfg.LLM_REQUEST_TIMEOUT,
-        max_retries=cfg.LLM_MAX_RETRIES,
-    )
+def _make_llm(model: str, temperature: float):
+    llm = get_llm(model_name=model, temperature=temperature, request_timeout=cfg.LLM_REQUEST_TIMEOUT, max_retries=cfg.LLM_MAX_RETRIES)
+    return llm.with_config(callbacks=[telemetry_handler])
 
 
 router_llm = _make_llm(cfg.ROUTER_MODEL, cfg.ROUTER_TEMPERATURE)
@@ -142,6 +148,7 @@ class AgentState(TypedDict):
     viz_html: str
     llm_call_count: int
     stage_latencies: dict
+    llm_telemetry: list
     analyst_memory: dict
 
 
@@ -178,6 +185,8 @@ def _recent_context(messages: Sequence[BaseMessage], n: int, exclude_last: bool)
 # Nodes
 # ==========================================
 def router_node(state: AgentState) -> dict:
+    start_turn_telemetry()
+    token = set_current_stage("router")
     user_question = state["messages"][-1].content
     structured_llm = router_llm.with_structured_output(RouteDecision)
     history_context = _recent_context(state["messages"], cfg.ROUTER_HISTORY_MESSAGES, exclude_last=False)
@@ -196,6 +205,8 @@ def router_node(state: AgentState) -> dict:
     except Exception as e:
         logger.error("Router fully failed, defaulting to GENERAL: %s", e)
         decision = RouteDecision(agent="GENERAL", confidence=0.3, reasoning="fallback after failure", language="en")
+    finally:
+        reset_current_stage(token)
 
     logger.info(
         "Q='%s' | route=%s | confidence=%.2f | lang=%s | reason=%s",
@@ -224,14 +235,16 @@ def analysis_node(state: AgentState) -> dict:
         analyst_input = {
             "messages": state["messages"][-cfg.SUBAGENT_HISTORY_MESSAGES:],
             "language": lang,
-            "retry_count": 0,
+            "repair_attempts": 0,
             "current_step": 0,
         }
         
         # Inject previous state if available
         memory = state.get("analyst_memory", {})
         if memory:
-            analyst_input.update(memory)
+            for k, v in memory.items():
+                if k not in ["repair_attempts", "error", "error_type", "safety_blocked", "sql_queries", "current_step"]:
+                    analyst_input[k] = v
             
         result = analyst_agent.invoke(analyst_input)
         answer = result.get("final_answer", "No answer generated.")
@@ -251,12 +264,26 @@ def analysis_node(state: AgentState) -> dict:
             "viz_html": viz_html,
             "llm_call_count": result.get("llm_call_count", 0),
             "stage_latencies": result.get("stage_latencies", {}),
-            "analyst_memory": new_memory
+            "llm_telemetry": result.get("llm_telemetry") or get_turn_telemetry(),
+            "analyst_memory": new_memory,
+            "evidence": result.get("query_results", [])
         }
         return output
     except Exception as e:
+        error_str = str(e).lower()
         logger.error("Analysis agent failed: %s", e)
-        error_msg = f"Sorry, I encountered an internal error during the analysis: {e}"
+        
+        if "rate limit" in error_str or "429" in error_str or "timeout" in error_str:
+            if lang == "ar":
+                error_msg = "الخدمة مشغولة حالياً، يرجى المحاولة مرة أخرى بعد قليل."
+            else:
+                error_msg = "The service is busy, please try again in a moment."
+        else:
+            if lang == "ar":
+                error_msg = "عذراً، واجهت خطأ داخلي أثناء التحليل. يرجى المحاولة مرة أخرى."
+            else:
+                error_msg = "Sorry, I encountered an internal error during the analysis. Please try again."
+                
         return {"final_answer": error_msg, "messages": [AIMessage(content=error_msg)]}
 
 
@@ -316,6 +343,7 @@ def etl_node(state: AgentState) -> dict:
 
 
 def general_node(state: AgentState) -> dict:
+    token = set_current_stage("general")
     question = state["messages"][-1].content
     lang = state.get("language", "en")
     history_context = _recent_context(state["messages"], cfg.GENERAL_HISTORY_MESSAGES, exclude_last=False)
@@ -337,12 +365,15 @@ def general_node(state: AgentState) -> dict:
     except Exception as e:
         logger.error("General node failed: %s", e)
         answer = f"[Assistant error: {e}]"
+    finally:
+        reset_current_stage(token)
 
     return {"final_answer": answer, "messages": [AIMessage(content=answer)]}
 
 
 def polish_node(state: AgentState) -> dict:
     """Polishes a raw SQL/ETL answer without altering any fact, number, or name."""
+    token = set_current_stage("polish")
     question = state["messages"][-1].content
     lang = state.get("language", "en")
     raw = state.get("raw_answer", "")
@@ -350,10 +381,12 @@ def polish_node(state: AgentState) -> dict:
     # ❶ لو الإجابة الخام فاضية أو فيها error، رجّعها زي ما هي بدون "تحسين"
     if not raw or not raw.strip():
         fallback = "لم يتم العثور على إجابة من قاعدة البيانات." if lang == "ar" else "No answer was returned from the database."
+        reset_current_stage(token)
         return {"final_answer": fallback, "messages": [AIMessage(content=fallback)]}
 
     raw_lower = raw.lower()
     if any(kw in raw_lower for kw in ["error", "unavailable", "failed to load", "no answer"]):
+        reset_current_stage(token)
         return {"final_answer": raw, "messages": [AIMessage(content=raw)]}
 
     # ❷ تعليمات صارمة لمنع التأليف
@@ -381,6 +414,8 @@ def polish_node(state: AgentState) -> dict:
         final = _call()
     except Exception:
         final = raw  # never lose the raw answer just because polishing failed
+    finally:
+        reset_current_stage(token)
 
     return {"final_answer": final, "messages": [AIMessage(content=final)]}
 

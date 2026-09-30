@@ -196,9 +196,26 @@ for i, msg in enumerate(st.session_state.chat_history):
                 
                 st.caption(caption_text)
                 
-                if meta.get("stage_latencies"):
-                    with st.expander("Performance Stats (Latencies)"):
-                        st.json(meta["stage_latencies"])
+                evidence = meta.get("evidence")
+                if evidence:
+                    with st.expander("🔍 How I got this"):
+                        for e in evidence:
+                            if hasattr(e, "executed_sql"):
+                                st.markdown(f"**Executed SQL:**\n```sql\n{e.executed_sql}\n```")
+                                st.markdown(f"**Row Count:** {e.row_count}")
+                                if e.truncated:
+                                    st.warning("⚠️ The results were truncated because they exceeded the maximum allowed rows.")
+                                st.markdown(f"**Timestamp:** {e.executed_at}")
+                                st.divider()
+                
+                if meta.get("stage_latencies") or meta.get("llm_telemetry"):
+                    with st.expander("Performance Stats (Latencies & LLM Telemetry)"):
+                        if meta.get("stage_latencies"):
+                            st.markdown("**Node Latencies (s):**")
+                            st.json(meta["stage_latencies"])
+                        if meta.get("llm_telemetry"):
+                            st.markdown("**LLM Call Telemetry:**")
+                            st.dataframe(meta["llm_telemetry"])
 
 # ==========================================
 # 8. Handle new user input
@@ -230,6 +247,8 @@ if user_query:
                 final_answer = snapshot.get("final_answer", final_answer)
                 if snapshot.get("route"):
                     route_meta = {"route": snapshot["route"], "confidence": snapshot.get("confidence", 0.0)}
+                if snapshot.get("evidence"):
+                    route_meta["evidence"] = snapshot["evidence"]
 
                 status_box.update(label="✅ تم", state="complete")
                 st.markdown(final_answer)
@@ -251,9 +270,14 @@ if user_query:
                     
                     st.caption(caption_text)
                     
-                    if snapshot.get("stage_latencies"):
-                        with st.expander("Performance Stats (Latencies)"):
-                            st.json(snapshot.get("stage_latencies"))
+                    if snapshot.get("stage_latencies") or snapshot.get("llm_telemetry"):
+                        with st.expander("Performance Stats (Latencies & LLM Telemetry)"):
+                            if snapshot.get("stage_latencies"):
+                                st.markdown("**Node Latencies (s):**")
+                                st.json(snapshot.get("stage_latencies"))
+                            if snapshot.get("llm_telemetry"):
+                                st.markdown("**LLM Call Telemetry:**")
+                                st.dataframe(snapshot.get("llm_telemetry"))
 
             except Exception as e:
                 # Log the full exception server-side; show the user a short,
@@ -272,6 +296,7 @@ if user_query:
             meta_to_save["viz_html"] = snapshot.get("viz_html", "")
             meta_to_save["llm_call_count"] = snapshot.get("llm_call_count", 0)
             meta_to_save["stage_latencies"] = snapshot.get("stage_latencies", {})
+            meta_to_save["llm_telemetry"] = snapshot.get("llm_telemetry", [])
             
         st.session_state.turn_meta[len(st.session_state.chat_history) - 1] = meta_to_save
 

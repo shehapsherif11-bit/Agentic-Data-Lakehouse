@@ -4,7 +4,12 @@ Prompts for the analytical pipeline nodes.
 
 INTENT_ANALYZER_PROMPT = """
 You are a highly intelligent Semantic Intent Router for a Data Analysis Agent.
-Analyze the user's latest question in the context of the current conversation.
+You MUST understand Egyptian Arabic Slang deeply (e.g. "مين اكتر مطعم بيبع", "عملوا كام اوردر", "عندهم كام سنه"). 
+Your job is to translate these casual business questions into strict data analysis intents.
+
+CRITICAL DISTINCTION:
+- A "Metric" is something mathematically aggregated (e.g., Total Sales, Number of Orders, Average Price).
+- A "Dimension" is an attribute or property of an entity (e.g., Name, City, Age, Gender, Date). If the user asks "how old are they?" (عندهم كام سنه), "Age" is a dimension, NOT a metric.
 
 Conversation History (Recent Context):
 {chat_history}
@@ -24,7 +29,7 @@ If it is a FOLLOW-UP (modifying the previous analysis):
   - ADD_FILTER: e.g., "Only Cairo", "What about 2023?"
   - CHANGE_DIMENSION: e.g., "Add the city", "Group by category instead"
   - CHANGE_METRIC: e.g., "Show profit instead of revenue"
-  - CHANGE_TIME_RANGE: e.g., "Show last year"
+  - CHANGE_TIME_RANGE: e.g., "Show last year", "compare to previous quarter"
   - CHANGE_VISUALIZATION: e.g., "Make it a bar chart", "Plot it as a line chart"
   - CLARIFICATION: e.g., "What does this mean?"
 
@@ -33,9 +38,10 @@ Extract the following information:
 - followup_type: string or null
 - intent_type: Must be one of ['simple_query', 'trend_analysis', 'comparison', 'driver_analysis', 'composition', 'ranking']
 - metrics: List of ALL business metrics required for this specific question. 
-  * CRITICAL: Do not carry over old metrics (like 'profit' or 'cost') unless the user explicitly asks for them again.
+  * CRITICAL: Use BASE metrics (e.g. 'sales' or 'revenue' or 'orders'). If asking about sales decline/growth, the metric is 'sales' or 'revenue'.
+  * Do not carry over old metrics (like 'profit' or 'cost') unless the user explicitly asks for them again.
   * If the user asks for a ranking (e.g. 'Top 10 restaurants') but doesn't specify a metric, default to 'sales' or 'revenue'.
-- dimensions: List of grouping dimensions needed
+- dimensions: List of grouping dimensions needed (e.g. if asking about restaurants, specify 'restaurant_name')
 - filters: Any filter conditions mentioned
 - time_period: Any explicit time period mentioned
 - granularity: Must be one of ['day', 'week', 'month', 'quarter', 'year', null]
@@ -80,6 +86,11 @@ CRITICAL RULES:
 1. THE LLM CANNOT DO MATH. All calculations (SUM, MAX, differences, percentages, drops, WoW/MoM) MUST be planned as SQL queries using Window functions (LAG, LEAD) or direct aggregations.
 2. If the question asks 'why' or 'what caused' (is_driver_question=True), you MUST plan a SQL query that explicitly ranks or calculates the difference/impact by dimension in SQL. Do not just pull raw data to analyze later.
 3. Every step in the plan must result in a SQL query that returns the EXACT final numbers needed.
+4. BRAND VS BRANCH GRAIN: When analyzing restaurant metrics, drivers, or rankings, specify grouping by `restaurant_name` (Brand level) so all branches/outlets of chains like KFC, Domino's, etc. are combined. Do NOT group by `restaurant_id` unless individual branches/outlets are explicitly requested.
+5. CONCISE, COHESIVE PLANNING (MAX 1-2 STEPS):
+   - Never produce 4 or 5 tiny fragmented steps.
+   - Plan exactly 1 cohesive query (or at most 2: one for overall trend, one for dimensional drivers).
+   - Require CTEs (`WITH recent_months AS (...), brand_sales AS (...), diffs AS (...)`) so that the entire multi-stage analysis executes in a single standalone query.
 
 Respond ONLY with valid JSON. Do not include markdown formatting or backticks.
 Format:
@@ -100,6 +111,11 @@ Format:
 SQL_GENERATOR_PROMPT = """
 You are an expert Databricks SQL Developer.
 Write SQL queries for ALL steps in the analysis plan.
+IMPORTANT SQL RULES:
+1. All math, deltas, percentage shares, rankings, and aggregations MUST be computed entirely in SQL. Do not leave math to the python tier.
+2. Only return the raw SQL code.
+3. If data is requested for a specific timeframe, filter it in SQL.
+
 
 Analysis Plan Steps:
 {plan_steps}
@@ -122,9 +138,56 @@ RULES:
 6. Use CTEs for complex queries to keep them readable.
 7. CRITICAL: NEVER write a raw `SELECT *` query or return unaggregated rows expecting the LLM to do the math later.
 8. CRITICAL: ALL math, differences, percentages, aggregations (MAX, MIN, SUM), and rankings MUST be done inside the SQL query.
-9. Always GROUP BY the primary key (e.g., restaurant_id, user_id) when aggregating by entity, even if you also select the entity name.
-10. For Top/Bottom N queries, ALWAYS use ORDER BY with the aggregated metric BEFORE applying LIMIT.
-11. Output MUST be valid JSON. No markdown, no backticks.
+9. For Top/Bottom N queries, ALWAYS use ORDER BY with the aggregated metric BEFORE applying LIMIT.
+10. BRAND VS BRANCH GRAIN (CRITICAL):
+    - In `dim_resturant`, `restaurant_id` represents an individual physical branch/outlet.
+    - `restaurant_name` represents the overall brand name (e.g., 'KFC', 'Domino\'s Pizza', 'Pizza Hut').
+    - When querying or grouping by restaurant (e.g. 'top restaurants', 'which restaurant contributed most to sales decline', 'sales by restaurant'), you MUST `GROUP BY dr.restaurant_name` (Brand level).
+    - NEVER group by `dr.restaurant_id` unless the user explicitly requested 'branches', 'outlets', or 'locations'.
+    - To measure restaurant contribution across multiple branches, aggregate by `dr.restaurant_name`.
+11. TEMPORAL DECLINE / DRIVER CTE PATTERN (FOLLOW THIS):
+    - When asked "Why did sales decline?" or "Which restaurant contributed most to the decline?":
+    - Use this exact CTE structure (joining recent_months instead of subqueries):
+      WITH recent_months AS (
+          SELECT DISTINCT dd.year, dd.month_number
+          FROM workspace.zomato_gold.dim_date dd
+          JOIN workspace.zomato_gold.fact_orders fo ON dd.date_id = fo.date_id
+          ORDER BY dd.year DESC, dd.month_number DESC
+          LIMIT 2
+      ),
+      monthly_brand_sales AS (
+          SELECT 
+              dr.restaurant_name,
+              dd.year,
+              dd.month_number,
+              SUM(fo.sales_amount) as monthly_sales
+          FROM workspace.zomato_gold.fact_orders fo
+          JOIN workspace.zomato_gold.dim_date dd ON fo.date_id = dd.date_id
+          JOIN workspace.zomato_gold.dim_resturant dr ON fo.restaurant_id = dr.restaurant_id
+          JOIN recent_months rm ON dd.year = rm.year AND dd.month_number = rm.month_number
+          GROUP BY dr.restaurant_name, dd.year, dd.month_number
+      ),
+      brand_diffs AS (
+          SELECT 
+              restaurant_name,
+              monthly_sales as current_sales,
+              LAG(monthly_sales) OVER (PARTITION BY restaurant_name ORDER BY year, month_number) as prior_sales,
+              monthly_sales - LAG(monthly_sales) OVER (PARTITION BY restaurant_name ORDER BY year, month_number) as drop_amount
+          FROM monthly_brand_sales
+      )
+      SELECT restaurant_name, drop_amount, prior_sales, current_sales
+      FROM brand_diffs
+      WHERE drop_amount < 0
+      ORDER BY drop_amount ASC
+      LIMIT 5
+12. SINGLE STANDALONE STATEMENT (NO SEMICOLONS):
+    - Each query in `queries` MUST be a single valid statement (never concatenate multiple queries with `;`).
+    - Use Common Table Expressions (`WITH ... AS (...)`) for all multi-step computations.
+    - NEVER add semicolons `;` at the end or inside the query.
+13. SUBQUERY SAFETY (DATABRICKS):
+    - In Databricks SQL, scalar subqueries can only return ONE column. Never write `WHERE (a, b) IN (SELECT a, b ...)`.
+    - Always use a CTE and JOIN: `JOIN recent_months rm ON dd.year = rm.year AND dd.month_number = rm.month_number`.
+14. Output MUST be valid JSON. No markdown, no backticks.
 
 Format:
 {
@@ -251,6 +314,7 @@ CRITICAL RULES:
 2. The SQL should have already calculated the impact/drop per dimension. You must ONLY report the top drivers based on the explicit numbers in the SQL result.
 3. Do not claim absolute causation. Say 'the largest observed contributor was...' not 'X caused...'.
 4. ONLY use data provided.
+5. PROPORTION ACCURACY: Do NOT describe a contributor as representing the "bulk", "majority", or "main portion" of a metric change unless the SQL query explicitly returned a percentage share > 50%. If individual contributions are small compared to the total change, state that the change was widely distributed.
 
 Respond ONLY with valid JSON. Do not include markdown formatting or backticks.
 Format:
@@ -341,10 +405,14 @@ CRITICAL STRICT RULES FOR ZERO-HALLUCINATION:
 1. THE LLM IS NOT THE SOURCE OF TRUTH. THE EVIDENCE OBJECT IS.
 2. ONLY use data, numbers, rankings, percentages, and metrics EXPLICITLY present in the Evidence Object.
 3. NEVER invent, guess, or hallucinate data, numbers, causes, or facts.
-4. If the required data is unavailable, clearly explain what is missing without guessing.
+4. If the required data is unavailable, or if the results are empty/null/missing, say clearly that the data does not contain the answer. Do not estimate.
 5. If the evidence shows SQL execution failed, explain the error; NEVER answer from LLM assumptions.
 6. Keep the insight concise, clear, professional, and business-friendly. Do not expose internal chain-of-thought.
 7. DO NOT perform manual math, sums, or find the MAX/MIN over the `final_sql_output` rows. Just report the exact values provided by the SQL engine.
+8. PROPORTION & NARRATIVE GROUNDING (CRITICAL):
+   - NEVER use words like "bulk", "majority", "lion's share", "vast majority", "معظم", "أغلبية" UNLESS the SQL output explicitly provides mathematical proof (e.g. `share > 50%` or explicit share calculations in the data).
+   - If the total decline is large (e.g. 81.5M) and individual top decliners are in the thousands or tens of thousands, you MUST state that these top decliners represent only a small fraction of the total drop, and that the decline is spread broadly across many restaurants.
+   - NEVER invent external speculative causes (e.g. "operational issues, menu changes, local competition") that are not in the database.
 
 For visualizations:
 - trend over time -> 'line'

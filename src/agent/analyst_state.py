@@ -1,5 +1,18 @@
 from typing import Annotated, Any, Sequence, TypedDict
 from langchain_core.messages import BaseMessage
+from dataclasses import dataclass
+from typing import Tuple
+
+@dataclass(frozen=True)
+class Evidence:
+    query_id: str
+    executed_sql: str
+    columns: Tuple[str, ...]
+    rows: Tuple[Tuple, ...]
+    row_count: int
+    truncated: bool
+    executed_at: str
+
 from langgraph.graph.message import add_messages
 
 class AnalystState(TypedDict):
@@ -49,9 +62,10 @@ class AnalystState(TypedDict):
     final_answer: str
     
     # Control
-    retry_count: int
+    repair_attempts: int
     error: str
     
     # Performance Tracking
     llm_call_count: int
     stage_latencies: dict  # {stage_name: latency_seconds}
+    llm_telemetry: list    # [{node, provider, model, was_fallback, retries, prompt_tokens, completion_tokens, reasoning_tokens, wall_time, timestamp}]

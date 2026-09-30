@@ -16,25 +16,38 @@ import json
 import logging
 import re
 
-from langchain_groq import ChatGroq
+from src.agent.llm_factory import get_llm
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, END
 
 try:
     from . import router_config as cfg
-    from .analyst_state import AnalystState
+    from .analyst_state import AnalystState, Evidence
+    from .numeric_grounding import ungrounded_numbers, unbacked_narrative_claims
     from . import analyst_prompts as prompts
     from . import metrics_registry as metrics
     from .viz_engine import generate_chart
 except ImportError:
     import router_config as cfg
-    from analyst_state import AnalystState
+    from analyst_state import AnalystState, Evidence
+    from numeric_grounding import ungrounded_numbers, unbacked_narrative_claims
     import analyst_prompts as prompts
     import metrics_registry as metrics
     from viz_engine import generate_chart
 
+try:
+    from .telemetry import (
+        telemetry_handler, set_current_stage, reset_current_stage,
+        get_turn_telemetry, start_turn_telemetry
+    )
+except ImportError:
+    from telemetry import (
+        telemetry_handler, set_current_stage, reset_current_stage,
+        get_turn_telemetry, start_turn_telemetry
+    )
+
 from src.utils.database import DatabricksUtil
-from src.agent.sql_safety_guard import check_sql_safety, check_multiple_queries as safety_check_batch
+from src.agent.sql_safety_guard import check_sql_safety, check_multiple_queries as safety_check_batch, MAX_ROWS
 
 import time
 from functools import wraps
@@ -43,24 +56,32 @@ def track_performance(stage_name):
     def decorator(func):
         @wraps(func)
         def wrapper(state: AnalystState):
+            if stage_name == "intent_analyzer" and not state.get("llm_telemetry"):
+                start_turn_telemetry()
+            token = set_current_stage(stage_name)
             start = time.time()
-            result = func(state)
-            latency = time.time() - start
-            
-            # Count how many LLM calls happened by looking if it's an LLM node
-            is_llm_node = stage_name not in ['metric_resolver', 'sufficiency_check', 'sql_executor', 'sql_validator', 'sql_safety_guard', 'result_validator']
+            try:
+                result = func(state)
+            finally:
+                latency = time.time() - start
+                reset_current_stage(token)
             
             updates = result if result else {}
             
-            llm_count = state.get('llm_call_count', 0)
             latencies = state.get('stage_latencies', {})
-            
             new_latencies = dict(latencies)
             new_latencies[stage_name] = round(latency, 2)
-            
             updates['stage_latencies'] = new_latencies
-            if is_llm_node:
-                updates['llm_call_count'] = llm_count + 1
+            
+            turn_recs = get_turn_telemetry()
+            if turn_recs:
+                updates['llm_telemetry'] = list(turn_recs)
+                updates['llm_call_count'] = len(turn_recs)
+            elif 'llm_call_count' not in updates:
+                is_llm_node = stage_name not in ['metric_resolver', 'sufficiency_check', 'sql_executor', 'sql_validator', 'sql_safety_guard', 'result_validator']
+                llm_count = state.get('llm_call_count', 0)
+                if is_llm_node:
+                    updates['llm_call_count'] = llm_count + 1
                 
             return updates
         return wrapper
@@ -71,17 +92,13 @@ logger = logging.getLogger("analyst")
 # ==========================================
 # LLM — reuse the same factory from router_graph
 # ==========================================
-_analyst_llm = ChatGroq(
-    model=cfg.GENERAL_MODEL,
-    temperature=0.0,
-    api_key=cfg.GROQ_API_KEY,
-    request_timeout=cfg.LLM_REQUEST_TIMEOUT,
-    max_retries=cfg.LLM_MAX_RETRIES,
-)
+_base_analyst_llm = get_llm(model_name=cfg.GENERAL_MODEL, temperature=0.0, request_timeout=cfg.LLM_REQUEST_TIMEOUT, max_retries=cfg.LLM_MAX_RETRIES).with_config(callbacks=[telemetry_handler])
+_fallback_llm = get_llm(model_name=cfg.FALLBACK_MODEL, temperature=0.0, request_timeout=cfg.LLM_REQUEST_TIMEOUT, max_retries=cfg.LLM_MAX_RETRIES).with_config(callbacks=[telemetry_handler])
+_analyst_llm = _base_analyst_llm.with_fallbacks([_fallback_llm])
 
 _db = DatabricksUtil()
 
-MAX_SQL_RETRIES = 2
+MAX_REPAIRS = 3
 MAX_RESULT_ROWS_FOR_LLM = 50  # لا نرسل أكتر من 50 صف للـ LLM عشان ما نملأش الـ context
 
 
@@ -214,17 +231,21 @@ def data_sufficiency_check(state: AnalystState) -> dict:
         missing = sufficiency.get("missing", [])
         missing_text = "\n".join(f"- {m['name']}: {m['reason']}" for m in missing)
         lang = state.get("language", "en")
+        
+        available_list = sufficiency.get('available', [])
+        available_str = ", ".join(m for m in available_list)
+        
         if lang == "ar":
             msg = (
                 f"عذراً، لا يمكن حساب المقاييس المطلوبة لأن البيانات التالية غير متوفرة:\n"
                 f"{missing_text}\n\n"
-                f"البيانات المتوفرة حالياً يمكنها حساب: {', '.join(m['name'] for m in sufficiency.get('available', []))}"
+                f"البيانات المتوفرة حالياً يمكنها حساب: {available_str}"
             )
         else:
             msg = (
                 f"The requested analysis cannot be completed because the following data is not available:\n"
                 f"{missing_text}\n\n"
-                f"Available metrics that can be computed: {', '.join(m['name'] for m in sufficiency.get('available', []))}"
+                f"Available metrics that can be computed: {available_str}"
             )
         return {"final_answer": msg, "error": "data_insufficient"}
     return {}
@@ -351,43 +372,12 @@ def sql_generator(state: AnalystState) -> dict:
                 "error": None,
             })
 
-    return {"sql_queries": sql_queries, "current_step": 0, "retry_count": 0}
+    return {"sql_queries": sql_queries, "current_step": 0, "repair_attempts": 0}
 
 
 # ==========================================
 # Node 6: SQL Validator
 # ==========================================
-@track_performance("sql_validator")
-def sql_validator(state: AnalystState) -> dict:
-    """Static Python SQL Validator (replaces LLM to save time & rate limits)"""
-    sql_queries = list(state.get("sql_queries", []))
-    
-    dangerous_keywords = ['DROP', 'DELETE', 'UPDATE', 'INSERT', 'GRANT', 'REVOKE', 'TRUNCATE', 'ALTER']
-    
-    for i, q in enumerate(sql_queries):
-        if q.get("validated"):
-            continue
-            
-        sql_upper = q["sql"].upper()
-        issues = []
-        
-        # 1. Safety check
-        for kw in dangerous_keywords:
-            if re.search(r'\b' + kw + r'\b', sql_upper):
-                issues.append(f"Contains dangerous keyword: {kw}")
-                
-        # 2. Very basic check (must have SELECT and FROM)
-        if "SELECT" not in sql_upper:
-            issues.append("Missing SELECT statement")
-        if "FROM" not in sql_upper:
-            issues.append("Missing FROM statement")
-            
-        if issues:
-            sql_queries[i] = {**q, "validated": False, "validation_issues": issues, "error": "; ".join(issues)}
-        else:
-            sql_queries[i] = {**q, "validated": True, "validation_issues": []}
-
-    return {"sql_queries": sql_queries}
 
 
 # ==========================================
@@ -413,16 +403,24 @@ def sql_safety_guard(state: AnalystState) -> dict:
     blocked_count = 0
     for i, q in enumerate(checked):
         if not q.get("safety_passed", False):
-            # Mark as failed with a clear error so the repair loop can see it
             sql_queries[i] = {
                 **sql_queries[i],
                 "validated": False,
-                "error": f"SECURITY BLOCKED: {q['safety_reason']}",
+                "error": q.get("error", "SECURITY BLOCKED"), "error_type": "guard",
                 "safety_blocked": True,
             }
             blocked_count += 1
         else:
-            sql_queries[i] = {**sql_queries[i], "safety_blocked": False}
+            # Must merge back the injected limit and the cleaned SQL, and clear errors
+            sql_queries[i] = {
+                **sql_queries[i], 
+                "sql": q.get("sql", sql_queries[i].get("sql")),
+                "limit_injected": q.get("limit_injected", False),
+                "error": None, 
+                "error_type": None,
+                "safety_blocked": False,
+                "validated": True
+            }
     
     if blocked_count:
         logger.warning("SQL Safety Guard blocked %d / %d queries.", blocked_count, len(sql_queries))
@@ -452,12 +450,29 @@ def sql_executor(state: AnalystState) -> dict:
 
     for i, result in enumerate(results):
         if result.get("success"):
-            query_results.append({
-                "purpose": result.get("purpose", ""),
-                "columns": result.get("columns", []),
-                "rows": result.get("rows", []),
-                "row_count": result.get("row_count", 0),
-            })
+            # Find matching query to get limit_injected
+            limit_injected = False
+            for q in sql_queries:
+                if q.get("purpose") == result.get("purpose", ""):
+                    limit_injected = q.get("limit_injected", False)
+                    break
+                    
+            import datetime
+            import uuid
+            
+            # Convert rows from list of dicts to tuple of tuples
+            cols = result.get("columns", [])
+            tuple_rows = tuple(tuple(row.get(col) for col in cols) for row in result.get("rows", []))
+            
+            query_results.append(Evidence(
+                query_id=str(uuid.uuid4()),
+                executed_sql=result.get("sql", ""),
+                columns=tuple(cols),
+                rows=tuple_rows,
+                row_count=result.get("row_count", 0),
+                truncated=limit_injected and result.get("row_count", 0) == MAX_ROWS,
+                executed_at=datetime.datetime.utcnow().isoformat() + "Z"
+            ))
         else:
             # Track SQL errors for potential retry
             error_msg = result.get("error", "Unknown execution error")
@@ -476,16 +491,15 @@ def sql_executor(state: AnalystState) -> dict:
 # ==========================================
 @track_performance("sql_repair")
 def sql_repair(state: AnalystState) -> dict:
-    """إصلاح استعلامات SQL الفاشلة"""
+    """Repairs failed SQL queries"""
     sql_queries = list(state.get("sql_queries", []))
     schema_context = state.get("schema_context", "")
-    retry_count = state.get("retry_count", 0)
+    repair_attempts = state.get("repair_attempts", 0)
 
-    repaired = False
     for i, q in enumerate(sql_queries):
-        if q.get("error") and q.get("attempt", 0) <= MAX_SQL_RETRIES:
+        if q.get("error"):
             prompt = _format_prompt(prompts.SQL_REPAIR_PROMPT, 
-                sql_query=q["sql"],
+                sql_query=q.get("sql", ""),
                 errors=q["error"],
                 schema_context=schema_context,
             )
@@ -496,13 +510,14 @@ def sql_repair(state: AnalystState) -> dict:
             sql_queries[i] = {
                 **q,
                 "sql": fixed_sql,
-                "validated": False,  # Will need re-validation
+                "validated": False,
+                "safety_blocked": False,
                 "error": None,
+                "attempt": q.get("attempt", 0) + 1
             }
-            repaired = True
-            logger.info("Repaired SQL for step '%s' (attempt %d)", q["purpose"], q.get("attempt", 0))
+            logger.info("Repaired SQL for step '%s' (attempt %d)", q.get("purpose", ""), q.get("attempt", 1))
 
-    return {"sql_queries": sql_queries, "retry_count": retry_count + 1}
+    return {"sql_queries": sql_queries, "repair_attempts": repair_attempts + 1}
 
 
 # ==========================================
@@ -519,8 +534,10 @@ def result_validator(state: AnalystState) -> dict:
     issues = []
     warnings = []
     for r in query_results:
-        if r.get("row_count", 0) == 0:
-            warnings.append(f"Query '{r.get('purpose')}' returned 0 rows.")
+        row_count = r.row_count if isinstance(r, Evidence) else r.get("row_count", 0)
+        if row_count == 0:
+            purpose = "Query" if isinstance(r, Evidence) else r.get("purpose", "")
+            warnings.append(f"Query \'{purpose}\' returned 0 rows.")
             
     severity = "warning" if warnings else "ok"
     if issues:
@@ -541,8 +558,10 @@ def result_analyzer(state: AnalystState) -> dict:
 
     results_context = []
     for r in query_results:
-        rows_text = _truncate_results(r.get("rows", []))
-        results_context.append(f"Query Purpose: {r.get('purpose', 'N/A')}\nResults:\n{rows_text}")
+        rows = [dict(zip(r.columns, row)) for row in r.rows] if isinstance(r, Evidence) else r.get("rows", [])
+        rows_text = _truncate_results(rows)
+        purpose = "Query" if isinstance(r, Evidence) else r.get("purpose", "N/A")
+        results_context.append(f"Query Purpose: {purpose}\nResults:\n{rows_text}")
 
     prompt = _format_prompt(prompts.RESULT_ANALYZER_PROMPT, 
         results_context="\n\n---\n\n".join(results_context),
@@ -554,7 +573,7 @@ def result_analyzer(state: AnalystState) -> dict:
     if not analysis:
         analysis = {
             "findings": "Analysis completed but structured parsing failed.",
-            "evidence": str(query_results[0].get("rows", [])[:5]) if query_results else "No data",
+            "evidence": str([dict(zip(query_results[0].columns, row)) for row in query_results[0].rows][:5]) if isinstance(query_results[0], Evidence) else str(query_results[0].get("rows", [])[:5]) if query_results else "No data",
             "key_numbers": {},
             "trend_direction": None,
         }
@@ -574,16 +593,19 @@ def driver_analysis(state: AnalystState) -> dict:
     # The driver queries should be among the query_results (planned by the analysis_planner)
     dimensional_results = []
     for r in query_results:
-        purpose = r.get("purpose", "").lower()
+        purpose = ("Query" if isinstance(r, Evidence) else r.get("purpose", "")).lower()
         if any(kw in purpose for kw in ["breakdown", "driver", "dimension", "by "]):
-            rows_text = _truncate_results(r.get("rows", []))
-            dimensional_results.append(f"Breakdown: {r.get('purpose')}\nResults:\n{rows_text}")
+            rows = [dict(zip(r.columns, row)) for row in r.rows] if isinstance(r, Evidence) else r.get("rows", [])
+            rows_text = _truncate_results(rows)
+            dimensional_results.append(f"Breakdown: {purpose}\nResults:\n{rows_text}")
 
     if not dimensional_results:
         # Use all results as dimensional data
-        for r in query_results[1:]:  # Skip the first (main metric) result
-            rows_text = _truncate_results(r.get("rows", []))
-            dimensional_results.append(f"Breakdown: {r.get('purpose')}\nResults:\n{rows_text}")
+        for r in query_results[1:]:
+            rows = [dict(zip(r.columns, row)) for row in r.rows] if isinstance(r, Evidence) else r.get("rows", [])
+            purpose = "Query" if isinstance(r, Evidence) else r.get("purpose", "")
+            rows_text = _truncate_results(rows)
+            dimensional_results.append(f"Breakdown: {purpose}\nResults:\n{rows_text}")
 
     prompt = _format_prompt(prompts.DRIVER_ANALYSIS_PROMPT, 
         main_finding=analysis.get("findings", ""),
@@ -656,11 +678,11 @@ def insight_generator(state: AnalystState) -> dict:
         "queries_executed": len(query_results),
         "results": [
             {
-                "purpose": r.get("purpose", ""),
-                "row_count": r.get("row_count", 0),
-                "columns": r.get("columns", []),
-                # Pass the exact output, up to 50 rows. The LLM is banned from aggregating this.
-                "final_sql_output": r.get("rows", [])[:50] 
+                "query_id": r.query_id if hasattr(r, 'query_id') else "N/A",
+                "row_count": r.row_count if hasattr(r, 'row_count') else r.get("row_count", 0),
+                "truncated": r.truncated if hasattr(r, 'truncated') else False,
+                "columns": r.columns if hasattr(r, 'columns') else r.get("columns", []),
+                "final_sql_output": [dict(zip(r.columns, row)) for row in r.rows][:50] if hasattr(r, 'rows') else r.get("rows", [])[:50]
             } for r in query_results
         ],
         "findings": analysis.get("findings", ""),
@@ -670,7 +692,8 @@ def insight_generator(state: AnalystState) -> dict:
     # Find the most appropriate result for visualization (usually the first one with multiple rows)
     viz_target_result = None
     for r in query_results:
-        if r.get("row_count", 0) > 1:
+        rc = r.row_count if isinstance(r, Evidence) else r.get("row_count", 0)
+        if rc > 1:
             viz_target_result = r
             break
     if not viz_target_result and query_results:
@@ -678,8 +701,11 @@ def insight_generator(state: AnalystState) -> dict:
         
     results_summary = "No results available for visualization."
     if viz_target_result:
-        rows_sample = _truncate_results(viz_target_result.get("rows", []), max_rows=20)
-        results_summary = f"Columns: {viz_target_result.get('columns', [])}\nRow Count: {viz_target_result.get('row_count', 0)}\nSample:\n{rows_sample}"
+        rows = [dict(zip(viz_target_result.columns, row)) for row in viz_target_result.rows] if isinstance(viz_target_result, Evidence) else viz_target_result.get("rows", [])
+        cols = viz_target_result.columns if isinstance(viz_target_result, Evidence) else viz_target_result.get("columns", [])
+        rc = viz_target_result.row_count if isinstance(viz_target_result, Evidence) else viz_target_result.get("row_count", 0)
+        rows_sample = _truncate_results(rows, max_rows=20)
+        results_summary = f"Columns: {cols}\nRow Count: {rc}\nSample:\n{rows_sample}"
 
     lang_instruction = cfg.LANGUAGE_INSTRUCTIONS.get(lang, cfg.LANGUAGE_INSTRUCTIONS.get("en", "Reply in English."))
 
@@ -690,24 +716,58 @@ def insight_generator(state: AnalystState) -> dict:
         results_summary=results_summary,
         language_instruction=lang_instruction,
     )
-    response = _analyst_llm.invoke(prompt)
     
+    data_for_grounding = []
+    for r in query_results:
+        if isinstance(r, Evidence):
+            data_for_grounding.extend([dict(zip(r.columns, row)) for row in r.rows])
+        else:
+            data_for_grounding.extend(r.get("rows", []))
+            
+    response = _analyst_llm.invoke(prompt)
     parsed = _parse_json(response.content)
     
     if parsed and "insight" in parsed:
+        ungrounded = ungrounded_numbers(parsed["insight"], data_for_grounding)
+        narrative_violations = unbacked_narrative_claims(parsed["insight"], data_for_grounding)
+        hallucination_issues = ungrounded + narrative_violations
+        if hallucination_issues:
+            logger.warning(f"Hallucination detected in insight: {hallucination_issues}. Retrying once.")
+            retry_prompt = (
+                prompt + "\n\nCRITICAL WARNING: Your previous answer contained these ungrounded numbers or unbacked claims:\n" 
+                + "\n".join(f"- {issue}" for issue in hallucination_issues) 
+                + "\nYou MUST NOT invent numbers, and NEVER claim entities represent the 'bulk' or 'majority' without explicit >50% share proof."
+            )
+            response2 = _analyst_llm.invoke(retry_prompt)
+            parsed2 = _parse_json(response2.content)
+            
+            if parsed2 and "insight" in parsed2:
+                parsed = parsed2
+                ungrounded2 = ungrounded_numbers(parsed["insight"], data_for_grounding)
+                narrative_violations2 = unbacked_narrative_claims(parsed["insight"], data_for_grounding)
+                if ungrounded2 or narrative_violations2:
+                    logger.error(f"Hallucination persisted: {ungrounded2 + narrative_violations2}. Using fallback template.")
+                    if lang == "ar":
+                        parsed["insight"] = f"\u062a\u0645 \u0625\u0631\u062c\u0627\u0639 {evidence_object['results'][0]['row_count'] if evidence_object['results'] else 0} \u0635\u0641\u0648\u0641 \u0645\u0646 \u0627\u0644\u0628\u064a\u0627\u0646\u0627\u062a. \u064a\u0631\u062c\u0649 \u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u0641\u064a \u0642\u0633\u0645 '\u0643\u064a\u0641 \u062d\u0635\u0644\u062a \u0639\u0644\u0649 \u0647\u0630\u0627'."
+                    else:
+                        parsed["insight"] = f"The data returned {evidence_object['results'][0]['row_count'] if evidence_object['results'] else 0} rows. Please view the 'How I got this' expander for details."
+                        
         final_answer = parsed["insight"]
         viz_spec = parsed.get("viz_spec", {"should_visualize": False})
     else:
         # Fallback if parsing fails
-        final_answer = response.content.replace("```json", "").replace("```", "").strip()
+        final_answer = response.content
         viz_spec = {"should_visualize": False}
-
-    # Generate the chart if needed
-    viz_html = ""
+        
+    viz_html = None
     if viz_spec.get("should_visualize") and viz_target_result:
-        chart_html = generate_chart(viz_spec, viz_target_result.get("rows", []))
-        if chart_html:
-            viz_html = chart_html
+        viz_data = [dict(zip(viz_target_result.columns, row)) for row in viz_target_result.rows] if isinstance(viz_target_result, Evidence) else viz_target_result.get("rows", [])
+        try:
+            chart_html = generate_chart(viz_spec, viz_data)
+            if chart_html:
+                viz_html = chart_html
+        except Exception as e:
+            logger.error(f"Viz generation failed: {e}")
 
     return {"evidence_object": evidence_object, "final_answer": final_answer, "viz_spec": viz_spec, "viz_html": viz_html, "messages": [AIMessage(content=final_answer)]}
 
@@ -722,17 +782,37 @@ def after_sufficiency(state: AnalystState) -> str:
     return "continue"
 
 
-def after_execution(state: AnalystState) -> str:
-    """بعد التنفيذ — نتحقق لو فيه أخطاء محتاجة إصلاح"""
+
+def after_guard(state: AnalystState) -> str:
+    """Routes after safety guard: if guard fails, go to repair or error."""
     sql_queries = state.get("sql_queries", [])
-    retry_count = state.get("retry_count", 0)
+    repair_attempts = state.get("repair_attempts", 0)
 
-    # Check if any queries failed and can be retried
-    has_errors = any(q.get("error") and q.get("attempt", 0) <= MAX_SQL_RETRIES for q in sql_queries)
-    if has_errors and retry_count < MAX_SQL_RETRIES:
-        return "repair"
+    has_guard_errors = any(q.get("error_type") == "guard" for q in sql_queries)
+    if has_guard_errors:
+        if repair_attempts < MAX_REPAIRS:
+            return "repair"
+        else:
+            return "end_with_error"
+    return "execute"
 
-    # Check if we got any results at all
+def after_execution(state: AnalystState) -> str:
+    """Routes after execution: if genuine SQL errors, go to repair."""
+    sql_queries = state.get("sql_queries", [])
+    repair_attempts = state.get("repair_attempts", 0)
+
+    has_sql_errors = any(q.get("error_type") == "sql" for q in sql_queries)
+    has_fatal_errors = any(q.get("error_type") in ["connection", "timeout"] for q in sql_queries)
+    
+    if has_fatal_errors:
+        return "end_with_error"
+        
+    if has_sql_errors:
+        if repair_attempts < MAX_REPAIRS:
+            return "repair"
+        else:
+            return "end_with_error"
+            
     query_results = state.get("query_results", [])
     if not query_results:
         return "end_with_error"
@@ -802,7 +882,6 @@ def build_analyst_graph():
     graph.add_node("sufficiency_check", data_sufficiency_check)
     graph.add_node("analysis_planner", analysis_planner)
     graph.add_node("sql_generator", sql_generator)
-    graph.add_node("sql_validator", sql_validator)
     graph.add_node("sql_safety_guard", sql_safety_guard)
     graph.add_node("sql_executor", sql_executor)
     graph.add_node("sql_repair", sql_repair)
@@ -838,10 +917,14 @@ def build_analyst_graph():
 
     # Linear: planner → sql gen → sql validate → SAFETY GUARD → sql execute
     graph.add_edge("analysis_planner", "sql_generator")
-    graph.add_edge("sql_generator", "sql_validator")
-    graph.add_edge("sql_validator", "sql_safety_guard")
-    graph.add_edge("sql_safety_guard", "sql_executor")
-
+    graph.add_edge("sql_generator", "sql_safety_guard")
+    
+    graph.add_conditional_edges("sql_safety_guard", after_guard, {
+        "execute": "sql_executor",
+        "repair": "sql_repair",
+        "end_with_error": "error_end",
+    })
+        
     # Conditional: after execution → (repair | validate results | error end)
     graph.add_conditional_edges("sql_executor", after_execution, {
         "repair": "sql_repair",
@@ -850,7 +933,7 @@ def build_analyst_graph():
     })
 
     # Repair loop → back to validator
-    graph.add_edge("sql_repair", "sql_validator")
+    graph.add_edge("sql_repair", "sql_safety_guard")
 
     # Conditional: after result validation → (analyze | error end)
     graph.add_conditional_edges("result_validator", after_result_validation, {
