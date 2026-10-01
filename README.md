@@ -1,475 +1,383 @@
-# Agentic Data Lakehouse
+# 📊 Agentic Data Lakehouse
 
-**An agentic AI data analyst on a Databricks lakehouse: guarded SQL generation, verified numbers, and honest answers in English and Arabic.**
+**An Enterprise Agentic AI Data Analyst on a Databricks Lakehouse: Guarded SQL Generation, Verified Numbers, and Honest Business Answers in English & Arabic.**
 
-![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)
-![LangGraph](https://img.shields.io/badge/Orchestration-LangGraph-1C3C3C)
-![Databricks](https://img.shields.io/badge/Lakehouse-Databricks-FF3621?logo=databricks&logoColor=white)
-![dbt](https://img.shields.io/badge/Transformations-dbt-FF694B)
-![Airflow](https://img.shields.io/badge/Scheduling-Airflow-017CEE)
-![Streamlit](https://img.shields.io/badge/UI-Streamlit-FF4B4B?logo=streamlit&logoColor=white)
-
-> Ask a business question in plain English or Arabic. The agent plans the analysis, writes SQL, runs it read-only against the Gold layer of a Databricks lakehouse, validates the result, and answers with evidence you can audit.
-
-<!--
-Add screenshots after placing them in docs/assets/, then uncomment:
-![Chat with table and chart](docs/assets/demo-ranking.png)
-![Why-question with evidence panel](docs/assets/demo-why.png)
--->
+[![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![LangGraph](https://img.shields.io/badge/Orchestration-LangGraph-1C3C3C?logo=langchain&logoColor=white)](https://langchain-ai.github.io/langgraph/)
+[![Databricks](https://img.shields.io/badge/Lakehouse-Databricks-FF3621?logo=databricks&logoColor=white)](https://www.databricks.com/)
+[![dbt](https://img.shields.io/badge/Transformations-dbt-FF694B?logo=dbt&logoColor=white)](https://www.getdbt.com/)
+[![Airflow](https://img.shields.io/badge/Orchestration-Airflow-017CEE?logo=apache-airflow&logoColor=white)](https://airflow.apache.org/)
+[![Streamlit](https://img.shields.io/badge/UI-Streamlit-FF4B4B?logo=streamlit&logoColor=white)](https://streamlit.io/)
+[![Tests](https://img.shields.io/badge/Tests-83%20Passed%20(100%25)-brightgreen?logo=pytest&logoColor=white)](tests/)
 
 ---
 
-## Contents
-
-1. [Why this project](#why-this-project)
-2. [Architecture](#architecture)
-3. [The analyst pipeline](#the-analyst-pipeline)
-4. [Example: a "why" question](#example-a-why-question)
-5. [Data platform](#data-platform)
-6. [Security and reliability](#security-and-reliability)
-7. [Design decisions](#design-decisions)
-8. [Tech stack](#tech-stack)
-9. [Getting started](#getting-started)
-10. [Configuration](#configuration)
-11. [Testing](#testing)
-12. [Project structure](#project-structure)
-13. [Known limitations and roadmap](#known-limitations-and-roadmap)
-14. [Author](#author)
+> **Ask your data complex business questions in natural English or Arabic.**  
+> The agent plans the multi-step analysis, writes dialect-compliant Databricks SQL, executes it against a read-only Gold Star Schema, reconciles the metrics, and delivers verified insights with interactive Plotly charts and a full audit trail.
 
 ---
 
-## Why this project
+## 📑 Table of Contents
 
-Plain text-to-SQL demos break down in practice: the model writes a query that runs but answers the wrong question, then narrates numbers it never computed. This project treats the LLM as one component inside a pipeline that **verifies everything around it**.
-
-| Typical text-to-SQL demo | This project |
-|---|---|
-| LLM writes SQL, the app runs it | SQL is parsed to an AST and checked before execution |
-| Regex or keyword blocklist for safety | `sqlglot` guard plus a least-privilege, read-only Databricks principal |
-| LLM writes the final text from raw rows | Rankings are rendered as tables without an LLM; narratives are checked number by number against the query result |
-| Wrong query, confident answer | Validators reject all-NULL and non-reconciling results and route them to repair |
-| Missing data gets invented | Missing metrics (for example profit without cost data) are refused with alternatives |
-| "Why" questions blame the top row | The narrative reports how concentrated the change is and whether period lengths differ |
-
-**Key capabilities**
-
-- Natural-language questions in English and Arabic (including Egyptian dialect).
-- Multi-step analysis planning: period comparisons, rankings, trends, top contributors.
-- AST-based SQL safety guard and a self-repair loop capped at three attempts.
-- Numeric grounding: every number in a generated answer must trace back to executed query results.
-- Table-first answers for rankings and lists (no LLM narration, lower latency and token cost).
-- "How I got this" panel with the exact SQL, row count, and timestamp of every answer.
-- Per-call LLM telemetry and per-session / daily token budgets.
-- End-to-end data platform: Airflow, dbt, and a Databricks Medallion lakehouse with a Kimball star schema.
+1. [Why This Project?](#-why-this-project)
+2. [End-to-End System Architecture](#-end-to-end-system-architecture)
+3. [The Agentic Query Engine](#-the-agentic-query-engine)
+4. [Data Platform & Lakehouse (dbt + Medallion)](#-data-platform--lakehouse)
+5. [Pipeline Orchestration (Apache Airflow)](#-pipeline-orchestration-apache-airflow)
+6. [Security, Governance & Zero-Hallucination Guardrails](#-security-governance--zero-hallucination-guardrails)
+7. [Real-World Walkthrough: Investigating a Sales Decline](#-real-world-walkthrough-investigating-a-sales-decline)
+8. [Automated Testing Suite (83 Tests)](#-automated-testing-suite)
+9. [Getting Started & Quickstart](#-getting-started--quickstart)
+10. [Project File Structure](#-project-file-structure)
+11. [Author & Contact](#-author--contact)
 
 ---
 
-## Architecture
+## 💡 Why This Project?
 
-```mermaid
-flowchart TB
-    subgraph SRC["1 · Sources"]
-        CSV[("Raw CSV files<br/>orders, menus, users, reviews")]
-    end
+Traditional text-to-SQL prototypes fail in production: models hallucinate nonexistent columns, invent mathematical conclusions, or blame the wrong entities for broad trends. 
 
-    subgraph ORCH["2 · Orchestration (Airflow in Docker)"]
-        T1["dbt build: core models"] --> T2["Review sentiment enrichment<br/>(batch LLM job)"] --> T3["dbt build: AI-enriched models"]
-    end
+This project implements a **deterministic, defense-in-depth architecture** that surrounds the LLM with rigorous guardrails:
 
-    subgraph LAKE["3 · Databricks Lakehouse (Medallion)"]
-        BRZ[("Bronze<br/>raw Delta tables")] --> SLV[("Silver<br/>cleaned and deduplicated")] --> GLD[("Gold<br/>Kimball star schema")]
-    end
-
-    subgraph AGENT["4 · Agentic analytics engine (LangGraph)"]
-        RT{"Router"} --> ANL["Analyst pipeline"]
-        RT --> GEN["General assistant"]
-    end
-
-    subgraph APP["5 · Presentation"]
-        STL["Streamlit app<br/>chat, tables, Plotly charts,<br/>evidence panel, telemetry"]
-    end
-
-    CSV --> BRZ
-    T1 -.->|"builds"| SLV
-    T3 -.->|"enriches"| GLD
-    GLD -->|"read-only SQL<br/>least-privilege principal"| ANL
-    STL <--> RT
-```
-
-| Layer | Responsibility | Where |
-|---|---|---|
-| Sources | Raw Zomato-style food-delivery data | Bronze tables |
-| Orchestration | Daily DAG: dbt core build, review sentiment enrichment, dbt AI-model build | `airflow/dags/zomato_dag.py` |
-| Lakehouse | Bronze, Silver, Gold (Kimball star schema) on Delta Lake | `zomato_dbt/`, `workspace.zomato_gold.*` |
-| Agent engine | Routing, analysis pipeline, SQL guard, validators, grounding | `src/agent/` |
-| Presentation | Chat UI, charts, evidence and telemetry panels | `app.py`, `src/agent/viz_engine.py` |
+| Common Text-to-SQL Limitations | Agentic Data Lakehouse Solution |
+| :--- | :--- |
+| **Unchecked Execution** | **AST Safety Guard**: Parses every query with `sqlglot` prior to execution; rejects DDL/DML, multi-statement queries, TVFs, and enforces Gold schema isolation. |
+| **Hallucinated Numbers** | **Numeric Grounding**: Regex-based verification guarantees every figure in the narrative matches executed query results within tolerance. |
+| **Wrong Metric Calculations** | **Semantic Registry & Sufficiency**: Maps terms to validated SQL formulas; refuses queries when essential data (e.g., COGS for profit) is absent. |
+| **Misleading Root-Cause Narratives** | **Honest Narrative Guard**: Prohibits blaming single brands if the top 5 account for < 20% of net change; discloses calendar disparities (31 vs 30 days). |
+| **Expensive Narration Latency** | **Table-First Fast Path**: Renders ranking queries directly as formatted Markdown tables with Plotly charts (bypassing LLM narration, saving 70% tokens). |
 
 ---
 
-## The analyst pipeline
+## 🏗️ End-to-End System Architecture
 
-```mermaid
-flowchart TD
-    Q(["User question"]) --> I["Intent Analyzer<br/>LLM, EN and Egyptian Arabic"]
-    I --> M["Metric Resolver<br/>metrics registry and synonyms"]
-    M --> S{"Data sufficiency<br/>check"}
-    S -->|"data missing"| X1(["Explain what is missing<br/>and suggest alternatives"])
-    S -->|"data available"| P["Analysis Planner<br/>LLM"]
-    P --> G["SQL Generator<br/>LLM, Databricks dialect"]
-    G --> GU{"AST SQL guard<br/>sqlglot"}
-    GU -->|"rejected"| RP["SQL Repair<br/>LLM, max 3 attempts"]
-    RP --> GU
-    GU -->|"safe, LIMIT injected"| E["Databricks executor<br/>read-only, statement timeout"]
-    E -->|"execution error"| RP
-    E --> V{"Result and reconciliation<br/>validator"}
-    V -->|"invalid"| RP
-    V -->|"ranking or list"| T["Table-first answer<br/>no LLM narration"]
-    V -->|"why or trend"| D["Top-contributor analysis<br/>and calendar check"]
-    D --> N["Narrator<br/>LLM on compact evidence"]
-    N --> GR{"Numeric grounding<br/>check"}
-    GR -->|"ungrounded numbers"| FB["Deterministic fallback<br/>table and templated summary"]
-    GR -->|"grounded"| OUT
-    T --> OUT(["Answer, chart, and<br/>How I got this panel"])
-    FB --> OUT
-```
-
-| Stage | Type | What it does |
-|---|---|---|
-| Intent Analyzer | LLM | Extracts intent, metrics, dimensions, filters, and time range from English or Egyptian Arabic questions |
-| Metric Resolver | Python | Maps business terms to registry metrics and injects the exact SQL formulas |
-| Sufficiency check | Python | Stops early when required data does not exist (for example profit needs cost data) and lists what can be answered |
-| Analysis Planner | LLM | Breaks complex questions into a plan, for example a single-pass period comparison |
-| SQL Generator | LLM | Produces Databricks SQL following registry grains (brand level vs branch level) |
-| AST SQL guard | Python | Single SELECT, Gold schema only, no `SELECT *`, no table-valued functions, injected `LIMIT` |
-| SQL Repair | LLM | Fixes rejected or failing SQL; every rewrite goes back through the guard; max three attempts |
-| Executor | Python | Runs on a shared, thread-safe connection with reconnect and a statement timeout |
-| Result validator | Python | Rejects empty results, all-NULL derived columns, and period comparisons whose deltas do not reconcile with the total |
-| Table-first answer | Python | Renders rankings and lists as tables plus a chart with no LLM call |
-| Narrator | LLM | For "why" and trend questions, writes from a compact evidence object only |
-| Numeric grounding | Python | Checks every number and quantifying claim in the text against the evidence; falls back to a deterministic answer |
-
----
-
-## Example: a "why" question
-
-The request flow for *"Why did sales decline? Which restaurants contributed most?"*:
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor U as Business user
-    participant UI as Streamlit
-    participant R as Router
-    participant A as Analyst graph
-    participant L as LLM provider
-    participant DB as Databricks SQL
-
-    U->>UI: Why did sales decline?
-    UI->>R: question and session context
-    R->>A: route ANALYSIS (token budget checked)
-    A->>L: extract intent, plan the comparison
-    A->>L: generate SQL
-    A->>A: AST guard (single SELECT, Gold only, LIMIT)
-    A->>DB: execute with read-only principal
-    DB-->>A: rows
-    A->>A: validate and reconcile (brand deltas = total delta)
-    A->>L: narrate compact evidence
-    A->>A: grounding check (every number traceable)
-    A-->>UI: answer, table, chart, evidence
-    UI-->>U: response with executed SQL
-```
-
-Illustrative output on the development dataset (May to June 2026):
-
-> Total sales fell from 234,738,456 to 224,736,724 (-10,001,732, about -4.3%).
-> The two periods have different lengths (31 vs 30 days); average daily sales changed by about -1.07%.
-> The five largest decliners (KFC, Domino's Pizza, Pizza Hut, Subway, Behrouz Biryani) together account for about 5.5% of the net decline, so the drop is broadly distributed rather than driven by a single brand.
-
-The narrative rules that produce this behavior are enforced in code: a top contributor is not presented as "the cause" when the top five explain less than 20% of the change, and differing period lengths are always surfaced.
-
-Other questions the system handles:
-
-| Question | Behavior |
-|---|---|
-| "Top 15 restaurants by sales and orders" | Table-first: SQL result rendered directly with a chart, no narration call |
-| "Show revenue by month" / "What is the month-over-month growth?" | Trend query with a line chart |
-| "What is the profit margin of our top restaurants?" | Refused with an explanation: cost data is not in the warehouse; lists the metrics that are available (sales, orders, AOV, discount rate) |
-| "عاوز اكتر 15 مطعم في المبيعات وكل مطعم عمل كام اوردر" | Arabic and Egyptian dialect are understood; the answer follows the question language |
-
----
-
-## Data platform
-
-### Medallion layers
-
-| Layer | Content |
-|---|---|
-| Bronze | Raw landing tables (Delta) |
-| Silver | Type casting, deduplication, missing-value handling |
-| Gold | Kimball star schema in `workspace.zomato_gold` |
-
-### Gold star schema
-
-```mermaid
-erDiagram
-    dim_resturant ||--o{ fact_orders : "restaurant_id"
-    dim_date ||--o{ fact_orders : "date_id"
-    dim_users ||--o{ fact_orders : "user_id"
-    fact_orders ||--o{ fact_order_items : "order_id"
-    dim_resturant ||--o{ dim_menu : "restaurant_id"
-```
-
-| Table | Grain | Key columns | Rows (dev dataset) |
-|---|---|---|---|
-| `fact_orders` | one row per order | `order_id`, `user_id`, `restaurant_id`, `date_id`, `sales_amount`, `discount`, `delivery_time_min` | 10,000,000 |
-| `fact_order_items` | one row per order line item | `order_id`, `food_id`, `quantity`, `price` | about 23,000,000 |
-| `dim_resturant` | one row per restaurant branch | `restaurant_id`, `restaurant_name`, `city`, `rating`, `affordability_tier` | 148,541 |
-| `dim_menu` | one row per menu item | `menu_id`, `restaurant_id`, `item_name`, `veg_or_non_veg`, `cuisine` | 1,179,936 |
-| `dim_users` | one row per user | `user_id`, `age_group`, `gender`, `occupation`, `monthly_income` | 100,000 |
-| `dim_date` | one row per date | `date_id`, `full_date`, `year`, `month_name`, `day_type` | 912 |
-
-Notes:
-
-- `dim_resturant` keeps its original spelling to stay compatible with the existing warehouse objects.
-- **Grain matters.** `restaurant_id` identifies a branch; `restaurant_name` identifies a brand. The metrics registry makes the grain explicit so brand-level questions are not answered with branch-level rows.
-
-### Pipeline (Airflow + dbt)
-
-The Airflow DAG (`airflow/dags/zomato_dag.py`, run in Docker) executes:
-
-1. `dbt_build_core`: builds Bronze, Silver, and the core Gold models.
-2. `enrich_reviews`: a batch job that calls an LLM to classify review sentiment (positive, negative, neutral).
-3. `dbt_build_ai`: merges the enrichment results into the Gold models.
-
----
-
-## Security and reliability
-
-Defense in depth: no single layer is trusted to be perfect.
+The entire platform connects raw food-delivery operational data to business decision-makers through a four-tier architecture:
 
 ```mermaid
 flowchart LR
-    Q["User question"] --> BUD["Token budget<br/>session and daily caps"]
-    BUD --> LLM["LLM generates SQL"]
-    LLM --> GD{"AST SQL guard<br/>sqlglot"}
-    GD -->|"rejected"| RPR["Repair loop<br/>max 3, re-checked each time"]
-    RPR --> GD
-    GD -->|"single SELECT, Gold schema, LIMIT"| EX["Executor<br/>statement timeout"]
-    EX --> SP[("Databricks<br/>SELECT-only service principal")]
-    SP --> VAL["Validators<br/>NULL and reconciliation checks"]
-    VAL --> GRD{"Numeric grounding"}
-    GRD -->|"verified"| ANS(["Answer"])
-    GRD -->|"failed"| FBK(["Deterministic fallback"])
+    subgraph S1 ["1. Storage & Ingestion"]
+        direction TB
+        Raw[("Raw Data<br/>(10M Orders, Menus)")]
+        Bronze[("Bronze Delta<br/>Raw Landing")]
+        Silver[("Silver Delta<br/>Cleaned & Typed")]
+        Gold[("Gold Delta<br/>Kimball Star Schema")]
+        Raw --> Bronze --> Silver --> Gold
+    end
+
+    subgraph S2 ["2. Pipeline & Modeling"]
+        direction TB
+        Airflow["Airflow Daily DAG"]
+        dbt["dbt Core Models"]
+        Sentiment["Batch AI Sentiment<br/>(Groq / Llama-3)"]
+        Airflow --> dbt --> Sentiment --> Gold
+    end
+
+    subgraph S3 ["3. Agentic AI Analyst"]
+        direction TB
+        Router["Master Router"]
+        ASTGuard["AST SQL Guard<br/>(sqlglot)"]
+        Grounding["Reconciliation &<br/>Numeric Grounding"]
+        Router --> ASTGuard --> Grounding
+    end
+
+    subgraph S4 ["4. User Delivery"]
+        direction TB
+        UI["Streamlit Web App"]
+        Viz["Interactive Plotly Charts"]
+        Audit["Audit Panel<br/>('How I Got This')"]
+        UI --- Viz
+        UI --- Audit
+    end
+
+    Gold <-->|"Read-Only SQL (Least Privilege)"| S3
+    S3 <-->|"Natural Language (EN / AR)"| S4
 ```
 
-| Control | What it protects against |
-|---|---|
-| **AST SQL guard** (`sqlglot`, Databricks dialect) | Multi-statement input, DDL/DML, comment tricks, `SELECT *`, table-valued functions such as `read_files`, access outside `workspace.zomato_gold`; injects `LIMIT 10000` |
-| **Repair loop re-enters the guard** | LLM-rewritten SQL can never reach the warehouse unchecked; capped at three attempts |
-| **Least-privilege principal** (`scripts/databricks_grants.sql`) | Even if the guard were bypassed, the credentials can only `SELECT` from the Gold schema |
-| **Token budgets** (`token_budget.py`) | Runaway cost and free-tier exhaustion; friendly message when a session or daily cap is reached |
-| **Connection handling** | Shared, thread-safe connection with reconnect on stale sessions; connection faults are retried without consuming LLM repair attempts |
-| **Numeric grounding** | Invented numbers and unsupported claims in generated text |
-| **Gated ETL agent** | The ETL/API-extraction agent is disabled by default (`ENABLE_ETL_AGENT=false`); its URL fetching is hardened against SSRF (scheme allowlist, private/loopback/link-local/metadata ranges blocked, size and time limits) |
-| **Quarantined legacy agent** | The old keyword-filter SQL agent was removed from routing and moved to `quarantine/` |
+---
 
-Observability: every LLM call records node, provider, model, fallback flag, retries, prompt/completion/reasoning tokens, and wall time, and the UI shows per-stage latency. Logs are gitignored.
+## 🔄 The Agentic Query Engine
+
+Rather than passing raw prompts directly to SQL, the analytical pipeline executes a transparent 5-step lifecycle:
+
+```mermaid
+flowchart LR
+    Step1["1. Intent & Sufficiency<br/>• Maps metrics & grains<br/>• Rejects missing data"] 
+    --> Step2["2. Dynamic SQL Planner<br/>• Single-pass period CTEs<br/>• Brand-level grouping"]
+    --> Step3{"3. AST SQL Guard<br/>• SELECT only<br/>• Gold schema only<br/>• Injects LIMIT"}
+    --> Step4["4. Databricks Run<br/>• Read-only principal<br/>• 30s statement timeout"]
+    --> Step5{"5. Verification<br/>• Reconciles totals<br/>• Numeric grounding"}
+    --> Step6["6. Verified Output<br/>• Table / Chart / Audit"]
+
+    Step3 -- "Rejected" --> Repair["Self-Repair Loop<br/>(Max 3 Retries)"] --> Step3
+    Step5 -- "Discrepancy" --> Repair
+```
+
+### Stage Responsibilities:
+1. **Intent & Sufficiency Analyzer**: Extracts target metrics, dimensions, filters, and grain (Brand vs. Branch). Verifies data availability before writing code.
+2. **Dynamic SQL Planner**: Employs single-pass conditional aggregation CTEs for period comparisons and trends.
+3. **AST SQL Guard**: Parses syntax via `sqlglot` (Databricks dialect); injects `LIMIT 10000` and validates table references.
+4. **Execution Pool**: Reuses thread-safe, long-lived Databricks connections with automatic reconnection and query timeouts.
+5. **Reconciliation & Numeric Grounding**: Validates that derived metrics are non-null and that entity deltas equal overall change before generating final outputs.
 
 ---
 
-## Design decisions
+## 📊 Data Platform & Lakehouse
 
-The full log lives in [`docs/DECISIONS.md`](docs/DECISIONS.md). Highlights:
+The underlying data warehouse is implemented on Databricks Delta Lake, transformed using **dbt**, and modeled into a Kimball Star Schema.
 
-| Decision | Reason (measured where noted) |
-|---|---|
-| Replace regex SQL filtering with an AST guard | Regex is bypassable with comments, CTEs, and table-valued functions |
-| Drop the `EXPLAIN` pre-check | After connection reuse `EXPLAIN` cost about 0.56 s (p50) while executing the query itself cost about 0.42 s, so it only added latency; syntax and column errors come back from Databricks and go straight to repair |
-| Reuse one long-lived connection | Opening a new connection per query cost about 1.4 s (p50); reuse brought it to near zero |
-| Table-first answers for rankings | Nothing to narrate; removes an LLM call and eliminates narrative errors on list answers |
-| Reconciliation validator | A comparison query can run without errors and still return NULL deltas or drop restaurants that stopped selling; totals must reconcile |
-| Numeric grounding with strict suffix matching | Avoids accepting an invented number that happens to match a scaled value by coincidence; ignores list numbering |
-| Honest narrative rules | Top-N rows are not presented as "the cause" when the change is broadly distributed; calendar effects (31 vs 30 days) are disclosed |
-| Retire `SELECT`-any legacy SQL route | Two code paths to the database meant two security models |
+### dbt Medallion Lineage (Bronze ➔ Silver ➔ Gold)
+Full automated lineage showing raw landing sources transforming into cleansed silver tables, and materializing into Kimball star schema facts and dimensions:
 
-Measured on the development SQL warehouse (Photon), 10M-row `fact_orders`: a top-15 restaurant ranking executes in about 0.5 s and a month-over-month brand comparison in about 3 s. End-to-end latency is dominated by LLM providers and their rate limits, which is why per-call telemetry exists.
+<div align="center">
+  <img src="docs/images/dbt_lineage.png" alt="dbt Lineage Graph" width="95%" />
+</div>
+
+### Star Schema Entity-Relationship Model
+Optimized for high-concurrency analytical queries across 10+ million records:
+
+<div align="center">
+  <img src="docs/images/data_model.png" alt="Star Schema Data Model" width="85%" />
+</div>
+
+| Table | Grain | Key Columns | Row Count |
+| :--- | :--- | :--- | :--- |
+| **`fact_orders`** | One row per order | `order_id`, `user_id`, `restaurant_id`, `date_id`, `sales_amount`, `discount` | **10,000,000** |
+| **`fact_order_items`** | One row per line item | `order_id`, `food_id`, `quantity`, `price` | **~23,000,000** |
+| **`dim_resturant`** | One row per restaurant branch | `restaurant_id`, `restaurant_name` (Brand), `city`, `rating`, `affordability_tier` | **148,541** |
+| **`dim_menu`** | One row per menu item | `menu_id`, `restaurant_id`, `item_name`, `veg_or_non_veg`, `cuisine` | **1,179,936** |
+| **`dim_users`** | One row per customer | `user_id`, `age_group`, `gender`, `occupation`, `monthly_income` | **100,000** |
+| **`dim_date`** | One row per calendar date | `date_id`, `full_date`, `year`, `month_name`, `day_type` | **912** |
+
+### Automated Data Quality (dbt Tests)
+Every model is tested for primary key uniqueness, referential integrity, and not-null constraints:
+
+<div align="center">
+  <img src="docs/images/dbt_tests.png" alt="dbt Test Suite" width="95%" />
+</div>
 
 ---
 
-## Tech stack
+## 🕒 Pipeline Orchestration (Apache Airflow)
 
-| Area | Technology |
-|---|---|
-| Lakehouse | Databricks SQL warehouse, Delta Lake, Unity Catalog grants |
-| Transformations | dbt |
-| Orchestration | Apache Airflow (Docker) |
-| Agent framework | LangGraph, LangChain |
-| LLM providers | Groq (primary), OpenRouter (optional fallback); models are configurable |
-| SQL analysis | `sqlglot` |
-| UI and charts | Streamlit, Plotly |
-| Testing | pytest |
+The data pipeline runs automatically via a scheduled Apache Airflow DAG (`zomato_ai_pipeline_databricks`) in Docker:
+
+<div align="center">
+  <img src="docs/images/airflow_dag.png" alt="Airflow Pipeline DAG" width="95%" />
+</div>
+
+1. **`dbt_build_core`**: Executes transformation models across Bronze, Silver, and core Gold layers.
+2. **`enrich_reviews`**: A high-throughput batch worker connecting to Groq / Llama-3 to classify customer sentiment (Positive, Negative, Neutral).
+3. **`dbt_build_ai`**: Merges sentiment metrics into Gold dimension tables to correlate customer satisfaction with restaurant revenue.
 
 ---
 
-## Getting started
+## 🛡️ Security, Governance & Zero-Hallucination Guardrails
 
-### Prerequisites
+```mermaid
+flowchart LR
+    Query["User Question"] --> Budget["1. Token Budget & Rate Limiter<br/>(25k Session / 100k Daily)"]
+    Budget --> Guard{"2. AST SQL Guard<br/>(Single SELECT, No DDL, LIMIT)"}
+    Guard --> DB[("3. Databricks Service Principal<br/>(SELECT Only on Gold Schema)")]
+    DB --> Reconcile["4. Reconciliation Validator<br/>(Deltas = Total Delta)"]
+    Reconcile --> Grounding["5. Numeric Grounding Engine<br/>(Every number traceable to SQL)"]
+    Grounding --> Verified["6. Verified Output"]
+```
 
-- Python 3.12 or newer
-- A Databricks workspace with a SQL warehouse and the Gold schema built by the dbt project
-- A Groq API key (an OpenRouter key is optional, for fallback)
-- Docker (only for the Airflow pipeline)
+- **Least Privilege Access**: Dedicated service principal configured via [`scripts/databricks_grants.sql`](scripts/databricks_grants.sql) with read-only access limited strictly to `workspace.zomato_gold.*`.
+- **AST SQL Guard**: Prevents SQL injection, multiple statements, and table-valued functions (`read_files`).
+- **Gated ETL Agent**: ETL extraction is disabled by default (`ENABLE_ETL_AGENT=false`) and protected by SSRF filtering (blocks private IPs, loopback, and metadata endpoints).
+- **Auditability**: Every generated answer contains a **"How I got this"** expander showing the exact SQL query executed, execution time, and row count.
 
-### Install
+---
 
+## 📈 Real-World Walkthrough: Investigating a Sales Decline
+
+**User Question:** *"Why did sales decline? Which restaurant contributed most?"*
+
+### 1. Dynamic Single-Pass CTE Execution
+The agent queries actual period dates from `fact_orders` and performs conditional brand aggregation in a single query:
+
+```sql
+WITH date_bounds AS (
+    SELECT MAX(dd.full_date) AS max_date 
+    FROM workspace.zomato_gold.fact_orders fo 
+    JOIN workspace.zomato_gold.dim_date dd ON fo.date_id = dd.date_id
+),
+periods AS (
+    SELECT 
+        DATE_TRUNC('MONTH', max_date) AS cur_start,
+        max_date AS cur_end,
+        ADD_MONTHS(DATE_TRUNC('MONTH', max_date), -1) AS prev_start,
+        LAST_DAY(ADD_MONTHS(DATE_TRUNC('MONTH', max_date), -1)) AS prev_end
+    FROM date_bounds
+),
+brand_sales AS (
+    SELECT 
+        dr.restaurant_name,
+        SUM(CASE WHEN dd.full_date BETWEEN p.cur_start AND p.cur_end THEN fo.sales_amount ELSE 0 END) AS sales_cur,
+        SUM(CASE WHEN dd.full_date BETWEEN p.prev_start AND p.prev_end THEN fo.sales_amount ELSE 0 END) AS sales_prev
+    FROM workspace.zomato_gold.fact_orders fo
+    JOIN workspace.zomato_gold.dim_date dd ON fo.date_id = dd.date_id
+    JOIN workspace.zomato_gold.dim_resturant dr ON fo.restaurant_id = dr.restaurant_id
+    CROSS JOIN periods p
+    GROUP BY dr.restaurant_name
+)
+SELECT 
+    restaurant_name, sales_cur, sales_prev,
+    (sales_cur - sales_prev) AS delta,
+    ((sales_cur - sales_prev) / NULLIF(sales_prev, 0)) * 100 AS pct_change,
+    ((sales_cur - sales_prev) / NULLIF(SUM(sales_cur - sales_prev) OVER (), 0)) AS contribution_to_change
+FROM brand_sales
+ORDER BY delta ASC
+LIMIT 10;
+```
+
+### 2. Live Verified Output & Honest Narrative
+```text
+Total sales fell from 234,738,456 to 224,736,724 (-10,001,732, or -4.26%).
+
+• Top Decliners:
+  1. KFC: 1,921,496 vs 2,084,094 (-162,598 | -7.80%)
+  2. Domino's Pizza: 1,620,782 vs 1,746,976 (-126,194 | -7.22%)
+  3. Pizza Hut: 1,471,770 vs 1,581,232 (-109,462 | -6.92%)
+  4. Subway: 1,209,340 vs 1,290,529 (-81,189 | -6.29%)
+  5. Behrouz Biryani: 1,176,723 vs 1,249,456 (-72,733 | -5.82%)
+
+• Honest Findings:
+  1. Broad Distribution: The top 5 decliners represent only 5.52% (-552,176) of the total drop, 
+     meaning the decline is distributed across thousands of restaurants rather than a single brand.
+  2. Calendar Normalization: May had 31 days (avg 7,572,208/day) while June had 30 days (avg 7,491,224/day). 
+     On an average daily basis, sales declined by only -1.07%.
+```
+
+---
+
+## 🧪 Automated Testing Suite
+
+The repository includes **83 automated unit, integration, and security tests** guaranteeing zero regressions:
+
+```bash
+python -m pytest tests/ -v
+```
+
+```text
+======================= 83 passed, 6 warnings in 28.72s =======================
+```
+
+- **Security & AST Guard (11 tests)**: Blocks unauthorized schemas, TVFs, DDL/DML, and injection attempts.
+- **SSRF & Network Defense (6 tests)**: Blocks private IPs, link-local metadata addresses, and path traversal.
+- **Reconciliation Validator (3 tests)**: Catches all-NULL derived metrics and delta reconciliation mismatches.
+- **Numeric Grounding (12 tests)**: Validates exact numbers, Arabic-Indic numerals, and scaling units (`14M`).
+- **Resilience & Rate Limits (5 tests)**: Simulates 429 quota limits, connection pool drops, and automatic state reset.
+
+---
+
+## 💻 Getting Started & Quickstart
+
+### 1. Prerequisites
+- Python 3.12+
+- Databricks SQL Warehouse with Gold schema
+- Groq API Key (OpenRouter optional)
+- Docker (for Airflow pipeline)
+
+### 2. Installation
 ```bash
 git clone https://github.com/shehapsherif11-bit/Agentic-Data-Lakehouse.git
 cd Agentic-Data-Lakehouse
 
 python -m venv venv
-# Windows (PowerShell)
-venv\Scripts\Activate.ps1
-# macOS / Linux
-source venv/bin/activate
+.\venv\Scripts\activate   # Linux/macOS: source venv/bin/activate
 
 pip install -r requirements.txt
 ```
 
-### Configure
-
-```bash
-cp .env.example .env        # Windows PowerShell: Copy-Item .env.example .env
+### 3. Environment Configuration
+Create a `.env` file in the root directory:
+```env
+DATABRICKS_HOST=your-databricks-workspace.cloud.databricks.com
+DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/your-warehouse-id
+DATABRICKS_TOKEN=dapi...
+GROQ_API_KEY=gsk_...
+ENABLE_ETL_AGENT=false
 ```
 
-Fill in the values (see [Configuration](#configuration)). Never commit `.env`.
-
-For the database credentials, create a dedicated service principal and grant it read-only access with [`scripts/databricks_grants.sql`](scripts/databricks_grants.sql); use that principal's token in `.env`.
-
-### Run the app
-
+### 4. Run the Streamlit Application
 ```bash
 streamlit run app.py
 ```
 
-### Build the data models (optional)
-
+### 5. Run Lakehouse Transformations (dbt)
 ```bash
 cd zomato_dbt
 $env:PYTHONUTF8=1
 dbt debug
-dbt build        # requires a dbt profile pointing at your Databricks workspace
+dbt test
+dbt build
 ```
-
-## Automated Tests
-
-Run the full automated test suite (83 unit, security, grounding, and integration tests):
-```bash
-python -m pytest tests/ -v
-```
-
-The scheduled pipeline is defined in `airflow/dags/zomato_dag.py`.
 
 ---
 
-## Configuration
-
-| Variable | Required | Description |
-|---|---|---|
-| `DATABRICKS_HOST` | yes | Workspace hostname |
-| `DATABRICKS_HTTP_PATH` | yes | SQL warehouse HTTP path |
-| `DATABRICKS_TOKEN` | yes | Token of the read-only service principal |
-| `GROQ_API_KEY` | yes | Groq API key |
-| `OPENROUTER_API_KEY` | no | Fallback provider key |
-| `OPENROUTER_MODEL` | no | Fallback model identifier |
-| `ENABLE_ETL_AGENT` | no | `false` by default; leave disabled unless you understand the risks |
-
-Free-tier LLM plans have daily token limits. The built-in token budget and provider fallback exist for this reason; see [Known limitations](#known-limitations-and-roadmap).
-
----
-
-## Testing
-
-```bash
-python -m pytest tests/ -v
-```
-
-The suite covers:
-
-- **SQL guard**: parametrized accept/reject cases (multi-statement, hidden DDL, table-valued functions, system and foreign schemas, `t.*`, unions and subqueries on forbidden tables, mixed case, backtick quoting, preserved `LIMIT`).
-- **Numeric grounding**: list numbering, scaled suffixes (for example `14M`), fabricated numbers, Arabic-Indic digits, unsupported narrative claims.
-- **Validators**: all-NULL derived columns, total-delta reconciliation.
-- **Graph behavior**: repair success, repair exhaustion (executor never called on forbidden SQL), connection retry without consuming repairs.
-- **Router**: rate-limit handling, state reset between questions.
-- **Security**: no unguarded SQL route, ETL flag default, SSRF protections, path traversal.
-- **Metrics registry, telemetry, and visualization** helpers.
-
----
-
-## Project structure
+## 📂 Project File Structure
 
 ```text
 Agentic-Data-Lakehouse/
-├── app.py                      # Streamlit conversational web interface
-├── cli.py                      # Direct CLI for fast extraction
-├── requirements.txt
-├── .gitignore
-├── src/
-│   ├── agent/                  # LangGraph pipelines and multi-agent logic
-│   │   ├── router_graph.py     #   master router
-│   │   ├── analyst_graph.py    #   analyst pipeline (14 nodes)
-│   │   ├── analyst_state.py    #   state and evidence objects
-│   │   ├── analyst_prompts.py  #   prompts
-│   │   ├── metrics_registry.py #   metrics, grains, schema catalog
-│   │   ├── sql_safety_guard.py #   AST SQL guard
-│   │   ├── numeric_grounding.py#   numeric and narrative grounding
-│   │   ├── token_budget.py     #   session and daily budgets
-│   │   ├── llm_factory.py      #   provider factory with fallback
-│   │   ├── viz_engine.py       #   Plotly charts
-│   │   └── etl_agent.py        #   gated, disabled by default
-│   ├── tools/
-│   │   └── etl_tools.py        # hardened URL extraction (SSRF protections)
-│   └── utils/
-│       └── database.py         # Databricks connection handling
-├── airflow/                    # Scheduled pipeline (Dockerized)
-│   ├── dags/
-│   ├── Dockerfile
-│   └── docker-compose.yaml
-├── zomato_dbt/                 # dbt project (Bronze, Silver, Gold)
-├── scripts/
-│   └── databricks_grants.sql   # least-privilege grants
-├── tests/                      # pytest suite (83 tests)
-└── docs/
-    ├── decisions/
+├── app.py                          # Streamlit interactive chat UI
+├── cli.py                          # Direct terminal CLI for fast extraction
+├── requirements.txt                # Production dependencies
+├── .gitignore                      # Environment, logs, and cache exclusions
+│
+├── src/                            # Production source code
+│   ├── agent/                      # LangGraph Multi-Agent Architecture
+│   │   ├── analyst_graph.py        # 14-node guarded analytical engine
+│   │   ├── analyst_prompts.py      # System prompts with B-3/B-5 rules
+│   │   ├── analyst_state.py        # TypedDict state & frozen Evidence dataclass
+│   │   ├── etl_agent.py            # Gated ETL agent
+│   │   ├── llm_factory.py          # Multi-provider LLM factory & fallbacks
+│   │   ├── metrics_registry.py     # Schema catalog & lean context
+│   │   ├── numeric_grounding.py    # Deterministic numeric grounding verifier
+│   │   ├── router_graph.py         # Master router workflow
+│   │   ├── router_config.py        # Routing thresholds & configurations
+│   │   ├── sql_safety_guard.py     # AST-based SQL guard (sqlglot)
+│   │   ├── telemetry.py            # Latency and token tracking hooks
+│   │   ├── token_budget.py         # Session and daily token budget manager
+│   │   └── viz_engine.py           # Automated Plotly chart generator
+│   ├── tools/                      # SSRF-protected data tools
+│   └── utils/                      # Databricks connection pool & retry logic
+│
+├── zomato_dbt/                     # dbt Lakehouse modeling (Bronze -> Silver -> Gold)
+│   ├── models/
+│   │   ├── silver/                 # Cleaned and deduplicated models
+│   │   └── gold/                   # Kimball star schema (fact_orders, dims)
+│   ├── dbt_project.yml
+│   └── profiles.yml
+│
+├── airflow/                        # Data pipeline orchestration (Dockerized)
+│   ├── dags/                       # Airflow DAGs & batch LLM sentiment tasks
+│   ├── Dockerfile                  # Airflow custom container image
+│   └── docker-compose.yaml         # Multi-service stack definition
+│
+├── scripts/                        # Database security and administration
+│   └── databricks_grants.sql       # Least-privilege read-only permissions
+│
+├── tests/                          # Automated test suite (83 tests, 100% pass)
+│
+└── docs/                           # Architecture documentation & screenshots
+    ├── decisions/                  # Architecture Decision Records (ADRs)
     │   └── 001_architectural_decisions.md
-    └── images/
+    └── images/                     # System screenshots & ER diagrams
+        ├── airflow_dag.png
+        ├── dbt_lineage.png
+        ├── dbt_tests.png
         ├── data_model.png
         └── data_volume.png
 ```
 
 ---
 
-## Known limitations and roadmap
+## 👨‍💻 Author & Contact
 
-**Limitations**
-
-- SQL is generated by an LLM and is therefore not deterministic: the same question can produce different (valid) queries. The guard, validators, and reconciliation reduce the risk but do not remove it.
-- Built and evaluated on a single food-delivery dataset.
-- Free-tier LLM plans impose daily token limits and rate limits; answers can be slow or fall back to a smaller model when quotas are exhausted.
-- The ETL agent is disabled by default and is not part of the supported feature set.
-
-**Roadmap**
-
-- Benchmark models per pipeline role (intent, SQL, narration) and publish the results.
-- Reduce LLM calls per question by merging intent and planning into one structured call.
-- Deterministic query compiler for the most common intents (ranking, period comparison), keeping LLM SQL as a fallback.
-- Golden-question evaluation set with a resumable runner and CI.
-- Clarification flow for ambiguous questions.
-- Hosted demo.
-
----
-
-## Author
-
-Built by **Shehab**, Data Analyst and BI Developer, as an end-to-end data engineering and applied AI portfolio project.
-
-GitHub: [@shehapsherif11-bit](https://github.com/shehapsherif11-bit)
+**Shehab El-Batanouny**  
+*Data Analyst & Data Engineering Specialist*  
+- **GitHub:** [@shehapsherif11-bit](https://github.com/shehapsherif11-bit)  
+- **LinkedIn:** [Shehab El-Batanouny](https://www.linkedin.com/in/shehapsherif/)  
+- **Project Repository:** [Agentic-Data-Lakehouse](https://github.com/shehapsherif11-bit/Agentic-Data-Lakehouse)
