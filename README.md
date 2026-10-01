@@ -355,7 +355,16 @@ streamlit run app.py
 
 ```bash
 cd zomato_dbt
+$env:PYTHONUTF8=1
+dbt debug
 dbt build        # requires a dbt profile pointing at your Databricks workspace
+```
+
+## Automated Tests
+
+Run the full automated test suite (83 unit, security, grounding, and integration tests):
+```bash
+python -m pytest tests/ -v
 ```
 
 The scheduled pipeline is defined in `airflow/dags/zomato_dag.py`.
@@ -400,15 +409,14 @@ The suite covers:
 
 ```text
 Agentic-Data-Lakehouse/
-├── app.py                      # Streamlit entry point
-├── cli.py                      # Terminal interface
-├── config.py                   # Settings
+├── app.py                      # Streamlit conversational web interface
+├── cli.py                      # Direct CLI for fast extraction
 ├── requirements.txt
-├── .env.example
+├── .gitignore
 ├── src/
-│   ├── agent/                  # LangGraph pipelines and agent logic
+│   ├── agent/                  # LangGraph pipelines and multi-agent logic
 │   │   ├── router_graph.py     #   master router
-│   │   ├── analyst_graph.py    #   analyst pipeline
+│   │   ├── analyst_graph.py    #   analyst pipeline (14 nodes)
 │   │   ├── analyst_state.py    #   state and evidence objects
 │   │   ├── analyst_prompts.py  #   prompts
 │   │   ├── metrics_registry.py #   metrics, grains, schema catalog
@@ -422,14 +430,20 @@ Agentic-Data-Lakehouse/
 │   │   └── etl_tools.py        # hardened URL extraction (SSRF protections)
 │   └── utils/
 │       └── database.py         # Databricks connection handling
-├── airflow/dags/               # Scheduled pipeline
+├── airflow/                    # Scheduled pipeline (Dockerized)
+│   ├── dags/
+│   ├── Dockerfile
+│   └── docker-compose.yaml
 ├── zomato_dbt/                 # dbt project (Bronze, Silver, Gold)
 ├── scripts/
 │   └── databricks_grants.sql   # least-privilege grants
-├── quarantine/                 # retired, unsafe legacy code (not imported)
-├── tests/                      # pytest suite
+├── tests/                      # pytest suite (83 tests)
 └── docs/
-    └── DECISIONS.md            # architecture decision log
+    ├── decisions/
+    │   └── 001_architectural_decisions.md
+    └── images/
+        ├── data_model.png
+        └── data_volume.png
 ```
 
 ---
