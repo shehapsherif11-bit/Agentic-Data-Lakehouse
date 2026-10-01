@@ -362,8 +362,6 @@ Agentic-Data-Lakehouse/
 ├── tests/                          # Automated test suite (83 tests, 100% pass)
 │
 └── docs/                           # Architecture documentation & screenshots
-    ├── decisions/                  # Architecture Decision Records (ADRs)
-    │   └── 001_architectural_decisions.md
     └── images/                     # System screenshots & ER diagrams
         ├── airflow_dag.png
         ├── dbt_lineage.png
