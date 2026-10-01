@@ -2,6 +2,8 @@
 # Modified for Databricks & AI Hybrid Architecture by the Senior 🚀
 x-airflow-common: &airflow-common
   build: .
+  env_file:
+    - ../.env   # 🟢 التعديل الأهم: قراءة كل المتغيرات من الفولدر الرئيسي بأمان بدون تكرار الملف
   environment: &airflow-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
@@ -11,16 +13,8 @@ x-airflow-common: &airflow-common
     AIRFLOW__API_AUTH__JWT_SECRET: 'change-me-please-a-random-secret'
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://apiserver:8080/execution/'
     
-    # 🔴 التعديل الجوهري: استبدال Snowflake بـ Databricks
-    DATABRICKS_HOST: ${DATABRICKS_HOST}
-    DATABRICKS_HTTP_PATH: ${DATABRICKS_HTTP_PATH}
-    DATABRICKS_TOKEN: ${DATABRICKS_TOKEN}
-    
-    # مفتاح الذكاء الاصطناعي عشان المرحلة الجاية
-    OPENAI_API_KEY: ${OPENAI_API_KEY}
-    
-    # تجهيز كونكشن Airflow لـ Databricks
-    AIRFLOW_CONN_DATABRICKS_DEFAULT: '{"conn_type":"databricks","host":"${DATABRICKS_HOST}","password":"${DATABRICKS_TOKEN}","extra":{"http_path":"${DATABRICKS_HTTP_PATH}"}}'
+    # 🔴 تم حذف DATABRICKS_HOST وباقي المتغيرات من هنا لأن env_file سيقوم بحقنها جميعاً 
+    # بشكل مباشر داخل بيئة Airflow تلقائياً (بما فيها OPENAI_API_KEY).
     
   volumes:
     - ./dags:/opt/airflow/dags
@@ -34,7 +28,6 @@ x-airflow-common: &airflow-common
 services:
   postgres:
     image: postgres:15-alpine
-
     environment:
       POSTGRES_USER: airflow
       POSTGRES_PASSWORD: airflow

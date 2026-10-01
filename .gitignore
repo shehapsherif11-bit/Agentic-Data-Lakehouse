@@ -1,12 +1,33 @@
+# Environment & Secret variables
 .env
+*.env
+
+# Python & Caches
 __pycache__/
-*.pyc
-*.log
+*.py[cod]
+*$py.class
+*.pytest_cache/
+.pytest_cache/
 venv/
-Data/
-*.vhdx
-data/
+env/
 .groq_model_cache.json
+
+# Logs & Telemetry
+*.log
+airflow/logs/
 eval/
 *.jsonl
 scratch/
+
+# Local & Docker Data
+Data/
+data/
+DockerData/
+*.vhdx
+
+# dbt Artifacts
+zomato_dbt/target/
+zomato_dbt/dbt_packages/
+zomato_dbt/logs/
+zomato_dbt/.user.yml
+Enterprise-Agentic-Lakehouse/
