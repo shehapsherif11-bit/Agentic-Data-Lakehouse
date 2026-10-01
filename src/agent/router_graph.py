@@ -43,8 +43,10 @@ from langgraph.checkpoint.memory import MemorySaver
 # falls back to a flat import if there's no enclosing package.
 try:
     from . import router_config as cfg
+    from .markdown_utils import sanitize_for_markdown
 except ImportError:
     import router_config as cfg
+    from markdown_utils import sanitize_for_markdown
 
 # ==========================================
 # Logging
@@ -143,6 +145,7 @@ class AgentState(TypedDict):
     stage_latencies: dict
     llm_telemetry: list
     analyst_memory: dict
+    evidence: list
 
 
 # ==========================================
@@ -174,6 +177,54 @@ def _recent_context(messages: Sequence[BaseMessage], n: int, exclude_last: bool)
     return "\n".join(f"{_speaker(m)}: {m.content}" for m in window)
 
 
+import re
+
+
+def _is_referential_question(text: str) -> bool:
+    """
+    Detects whether a user question is short, pronoun-heavy, or referential (lacking
+    its own self-contained data intent), referencing prior query results.
+    """
+    if not text:
+        return False
+    t = text.strip().lower()
+    words = re.findall(r"\w+", t)
+    
+    # Must be relatively concise (<= 15 words)
+    if len(words) > 15:
+        return False
+
+    # Standalone domain entities that indicate self-contained intent
+    standalone_domain_terms = {
+        "restaurant", "restaurants", "city", "cities", "user", "users",
+        "order", "orders", "cuisine", "cuisines", "customer", "customers",
+        "مطعم", "مطاعم", "مدينة", "مدن", "عميل", "عملاء", "مستخدم", "مستخدمين", "زبون", "زبائن"
+    }
+
+    # Explicit referential indicators
+    explicit_ref_markers = {
+        "that", "this", "these", "those", "it", "they", "them", "its", "their",
+        "previous", "prior", "earlier", "last", "above", "former", "result", "results",
+        "ده", "دي", "دول", "ذلك", "تلك", "هذا", "هذه", "هؤلاء",
+        "هو", "هي", "هما", "هم", "هن", "فيهم", "منهم", "عنه", "عنها",
+        "بتاعه", "بتاعتها", "بتاعهم", "بتاعتهم",
+        "السابق", "السابقة", "اللي فات", "الماضي", "النتيجه", "النتيجة"
+    }
+
+    has_ref_marker = any(w in explicit_ref_markers for w in words) or any(m in t for m in ("السابق", "السابقة", "اللي فات", "النتيجه", "النتيجة"))
+    if has_ref_marker:
+        return True
+
+    # If it lacks standalone domain entities and is a short question with referential interrogatives
+    has_domain_term = any(w in standalone_domain_terms for w in words)
+    if not has_domain_term and len(words) <= 10:
+        short_ref_interrogatives = {"which", "why", "who", "when", "how", "انهي", "أنهي", "اي", "أي", "مين", "كام", "ليه"}
+        if any(w in short_ref_interrogatives for w in words):
+            return True
+
+    return False
+
+
 # ==========================================
 # Nodes
 # ==========================================
@@ -183,6 +234,12 @@ def router_node(state: AgentState) -> dict:
     user_question = state["messages"][-1].content
     structured_llm = router_llm.with_structured_output(RouteDecision)
     history_context = _recent_context(state["messages"], cfg.ROUTER_HISTORY_MESSAGES, exclude_last=False)
+
+    has_prior_evidence = bool(
+        state.get("evidence") or 
+        (state.get("analyst_memory") and state.get("analyst_memory").get("previous_results"))
+    )
+    is_referential = _is_referential_question(user_question)
 
     messages = [
         SystemMessage(content=cfg.ROUTER_SYSTEM_PROMPT),
@@ -195,9 +252,26 @@ def router_node(state: AgentState) -> dict:
 
     try:
         decision: RouteDecision = _call()
+        if decision.agent == "GENERAL" and has_prior_evidence and is_referential:
+            logger.info("Overriding GENERAL decision to ANALYSIS for referential follow-up with active prior evidence.")
+            decision = RouteDecision(
+                agent="ANALYSIS",
+                confidence=0.95,
+                reasoning="Referential follow-up routed to ANALYSIS with active prior evidence in context",
+                language=decision.language
+            )
     except Exception as e:
-        logger.error("Router fully failed, defaulting to GENERAL: %s", e)
-        decision = RouteDecision(agent="GENERAL", confidence=0.3, reasoning="fallback after failure", language="en")
+        logger.error("Router fully failed: %s", e)
+        if has_prior_evidence and is_referential:
+            logger.info("Router failed, but question is referential follow-up with prior evidence -> routing to ANALYSIS.")
+            decision = RouteDecision(
+                agent="ANALYSIS",
+                confidence=0.95,
+                reasoning="Fallback: referential follow-up routed to ANALYSIS with active prior evidence",
+                language="ar" if any('\u0600' <= c <= '\u06FF' for c in user_question) else "en"
+            )
+        else:
+            decision = RouteDecision(agent="GENERAL", confidence=0.3, reasoning="fallback after failure", language="en")
     finally:
         reset_current_stage(token)
 
@@ -241,6 +315,7 @@ def analysis_node(state: AgentState) -> dict:
             
         result = analyst_agent.invoke(analyst_input)
         answer = result.get("final_answer", "No answer generated.")
+        answer = sanitize_for_markdown(answer)
         viz_html = result.get("viz_html", "")
 
         # Save context for next follow-up
@@ -326,6 +401,17 @@ def general_node(state: AgentState) -> dict:
     lang = state.get("language", "en")
     history_context = _recent_context(state["messages"], cfg.GENERAL_HISTORY_MESSAGES, exclude_last=False)
 
+    # Check if the question asks about a previous query result when no analyst evidence is available
+    has_evidence = bool(state.get("evidence") or (state.get("analyst_memory") and state.get("analyst_memory").get("previous_results")))
+    if not has_evidence and _is_referential_question(question):
+        msg = (
+            "عذراً، لا توجد نتائج سابقة مسجلة في هذه الجلسة للرجوع إليها. يرجى طرح سؤال جديد بخصوص البيانات المطلوبة."
+            if lang == "ar"
+            else "I do not have access to any previous query results in this session. Please rephrase as a new data question."
+        )
+        reset_current_stage(token)
+        return {"final_answer": msg, "messages": [AIMessage(content=msg)]}
+
     system = cfg.GENERAL_SYSTEM_PROMPT_TEMPLATE.format(
         language_instruction=cfg.LANGUAGE_INSTRUCTIONS.get(lang, cfg.LANGUAGE_INSTRUCTIONS["en"])
     )
@@ -340,6 +426,7 @@ def general_node(state: AgentState) -> dict:
 
     try:
         answer = _call()
+        answer = sanitize_for_markdown(answer)
     except Exception as e:
         logger.error("General node failed: %s", e)
         answer = f"[Assistant error: {e}]"
@@ -395,6 +482,7 @@ def polish_node(state: AgentState) -> dict:
     finally:
         reset_current_stage(token)
 
+    final = sanitize_for_markdown(final)
     return {"final_answer": final, "messages": [AIMessage(content=final)]}
 
 

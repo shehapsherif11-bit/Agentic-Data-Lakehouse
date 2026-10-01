@@ -27,6 +27,7 @@ try:
     from . import analyst_prompts as prompts
     from . import metrics_registry as metrics
     from .viz_engine import generate_chart
+    from .markdown_utils import sanitize_for_markdown, format_markdown_table
 except ImportError:
     import router_config as cfg
     from analyst_state import AnalystState, Evidence
@@ -34,6 +35,7 @@ except ImportError:
     import analyst_prompts as prompts
     import metrics_registry as metrics
     from viz_engine import generate_chart
+    from markdown_utils import sanitize_for_markdown, format_markdown_table
 
 try:
     from .telemetry import (
@@ -797,25 +799,10 @@ def insight_generator(state: AnalystState) -> dict:
         rows = [dict(zip(viz_target_result.columns, row)) for row in viz_target_result.rows] if isinstance(viz_target_result, Evidence) else viz_target_result.get("rows", [])
         cols = list(viz_target_result.columns) if isinstance(viz_target_result, Evidence) else list(viz_target_result.get("columns", []))
         
-        # Build clean markdown table
-        header = "| " + " | ".join(c.replace('_', ' ').title() for c in cols) + " |"
-        sep = "| " + " | ".join("---" for _ in cols) + " |"
-        data_lines = []
-        for row in rows:
-            formatted_vals = []
-            for c in cols:
-                val = row.get(c)
-                if isinstance(val, float):
-                    formatted_vals.append(f"{val:,.2f}" if abs(val) < 1000 and not val.is_integer() else f"{val:,.0f}")
-                elif isinstance(val, int):
-                    formatted_vals.append(f"{val:,}")
-                else:
-                    formatted_vals.append(str(val) if val is not None else "-")
-            data_lines.append("| " + " | ".join(formatted_vals) + " |")
-
-        table_md = "\n".join([header, sep] + data_lines)
+        # Build clean markdown table with right-aligned numeric columns
+        table_md = format_markdown_table(rows, cols, lang=lang)
         intro = f"**Top {len(rows)} Results:**\n\n" if lang == "en" else f"**أفضل {len(rows)} نتائج:**\n\n"
-        final_table_answer = f"{intro}{table_md}"
+        final_table_answer = sanitize_for_markdown(f"{intro}{table_md}")
 
         # Automatic visualization spec
         viz_spec = {"should_visualize": False}
@@ -948,6 +935,20 @@ def insight_generator(state: AnalystState) -> dict:
         except Exception as e:
             logger.error(f"Viz generation failed: {e}")
 
+    # Item 8: Tabular formatting for answers containing 3+ related numeric values
+    # For narrator-generated answers ("why" questions, trends, comparisons):
+    # any numbers the narrative references as a set must ALSO be rendered as a small Markdown table below the prose.
+    if query_results:
+        target_res = viz_target_result or query_results[0]
+        data_rows = [dict(zip(target_res.columns, row)) for row in target_res.rows] if isinstance(target_res, Evidence) else target_res.get("rows", [])
+        if len(data_rows) >= 3 and "|" not in final_answer:
+            table_md = format_markdown_table(data_rows, max_rows=10, lang=lang)
+            if table_md:
+                final_answer = f"{final_answer.strip()}\n\n{table_md}"
+
+    # Item 6: Apply centralized Markdown / LaTeX sanitization
+    final_answer = sanitize_for_markdown(final_answer)
+
     return {"evidence_object": evidence_object, "final_answer": final_answer, "viz_spec": viz_spec, "viz_html": viz_html, "messages": [AIMessage(content=final_answer)]}
 
 
@@ -1048,6 +1049,7 @@ def error_end(state: AnalystState) -> dict:
         if errors:
             msg += f"\nExecution errors:\n" + "\n".join(f"- {e}" for e in errors)
 
+    msg = sanitize_for_markdown(msg)
     return {"final_answer": msg, "messages": [AIMessage(content=msg)]}
 
 
@@ -1078,9 +1080,9 @@ def build_analyst_graph():
     # Wire the edges
     graph.set_entry_point("intent_analyzer")
 
-    # Conditional: after intent -> if CHANGE_VISUALIZATION -> skip to insight_generator
+    # Conditional: after intent -> if CHANGE_VISUALIZATION or CLARIFICATION -> skip to insight_generator
     def after_intent(state: AnalystState) -> str:
-        if state.get("is_followup") and state.get("followup_type") == "CHANGE_VISUALIZATION":
+        if state.get("is_followup") and state.get("followup_type") in ("CHANGE_VISUALIZATION", "CLARIFICATION"):
             return "insight"
         return "metrics"
         
