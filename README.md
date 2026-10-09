@@ -323,4 +323,4 @@ Agentic-Data-Lakehouse/
 ## 👨‍💻 Author
 
 **Shehab El-Batanouny** — AI & Data Engineering Specialist
-[GitHub @shehapsherif11-bit](https://github.com/shehapsherif11-bit) · [LinkedIn]([httpslinkedin.com/in/shehapelbatanouny](https://www.linkedin.com/in/shehapelbatanouny/)
+[GitHub @shehapsherif11-bit](https://github.com/shehapsherif11-bit) · [LinkedIn](https://www.linkedin.com/in/shehapelbatanouny/)
