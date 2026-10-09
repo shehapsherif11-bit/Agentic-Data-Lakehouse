@@ -1,155 +1,218 @@
 # 📊 Agentic Data Lakehouse
 
-**An Enterprise Agentic AI Data Analyst on a Databricks Lakehouse: Guarded SQL Generation, Verified Numbers, and Honest Business Answers in English & Arabic.**
+**An enterprise AI Data Analyst on a Databricks Lakehouse: guarded SQL, verified numbers, evidence-based root-cause analysis, and honest answers in English & Arabic.**
 
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![LangGraph](https://img.shields.io/badge/Orchestration-LangGraph-1C3C3C?logo=langchain&logoColor=white)](https://langchain-ai.github.io/langgraph/)
+[![LangGraph](https://img.shields.io/badge/Agents-LangGraph-1C3C3C?logo=langchain&logoColor=white)](https://langchain-ai.github.io/langgraph/)
 [![Databricks](https://img.shields.io/badge/Lakehouse-Databricks-FF3621?logo=databricks&logoColor=white)](https://www.databricks.com/)
 [![dbt](https://img.shields.io/badge/Transformations-dbt-FF694B?logo=dbt&logoColor=white)](https://www.getdbt.com/)
 [![Airflow](https://img.shields.io/badge/Orchestration-Airflow-017CEE?logo=apache-airflow&logoColor=white)](https://airflow.apache.org/)
 [![Streamlit](https://img.shields.io/badge/UI-Streamlit-FF4B4B?logo=streamlit&logoColor=white)](https://streamlit.io/)
-[![Tests](https://img.shields.io/badge/Tests-83%20Passed%20(100%25)-brightgreen?logo=pytest&logoColor=white)](tests/)
+[![Tests](https://img.shields.io/badge/Tests-315%20passing-brightgreen?logo=pytest&logoColor=white)](tests/)
 
----
+> **Ask your data business questions in plain English or Arabic.**
+> The agent routes the question, writes Databricks SQL (or builds it deterministically when the question has a known shape), checks it with an AST safety guard, runs it read-only against a Gold star schema, and answers with numbers that trace back to executed queries. When the data cannot support a conclusion, it says so.
 
-> **Ask your data complex business questions in natural English or Arabic.**  
-> The agent plans the multi-step analysis, writes dialect-compliant Databricks SQL, executes it against a read-only Gold Star Schema, reconciles the metrics, and delivers verified insights with interactive Plotly charts and a full audit trail.
+📐 Deep dive: [ARCHITECTURE.md](ARCHITECTURE.md) · 🧭 Design decisions: [DECISIONS.md](DECISIONS.md)
 
 ---
 
 ## 📑 Table of Contents
 
-1. [Why This Project?](#-why-this-project)
-2. [End-to-End System Architecture](#-end-to-end-system-architecture)
-3. [The Agentic Query Engine](#-the-agentic-query-engine)
-4. [Data Platform & Lakehouse (dbt + Medallion)](#-data-platform--lakehouse)
-5. [Pipeline Orchestration (Apache Airflow)](#-pipeline-orchestration-apache-airflow)
-6. [Security, Governance & Zero-Hallucination Guardrails](#-security-governance--zero-hallucination-guardrails)
-7. [Real-World Walkthrough: Investigating a Sales Decline](#-real-world-walkthrough-investigating-a-sales-decline)
-8. [Automated Testing Suite (83 Tests)](#-automated-testing-suite)
-9. [Getting Started & Quickstart](#-getting-started--quickstart)
-10. [Project File Structure](#-project-file-structure)
-11. [Author & Contact](#-author--contact)
+1. [Why this project](#-why-this-project)
+2. [See it in action](#-see-it-in-action)
+3. [How a question is answered](#-how-a-question-is-answered)
+4. [Root-cause analysis you can trust](#-root-cause-analysis-you-can-trust)
+5. [Safety & zero-hallucination guardrails](#-safety--zero-hallucination-guardrails)
+6. [Caching & data freshness](#-caching--data-freshness)
+7. [Observability](#-observability)
+8. [Data platform (dbt + Medallion)](#-data-platform-dbt--medallion)
+9. [Pipeline orchestration (Airflow)](#-pipeline-orchestration-airflow)
+10. [Testing](#-testing)
+11. [Getting started](#-getting-started)
+12. [Project structure](#-project-structure)
+13. [Author](#-author)
 
 ---
 
-## 💡 Why This Project?
+## 💡 Why this project
 
-Traditional text-to-SQL prototypes fail in production: models hallucinate nonexistent columns, invent mathematical conclusions, or blame the wrong entities for broad trends. 
+Text-to-SQL demos break in production: models invent columns, silently drop part of the question, narrate numbers they never computed, and blame a single entity for a broad trend. This project wraps the LLM in deterministic code so that **the model writes less and the system proves more**.
 
-This project implements a **deterministic, defense-in-depth architecture** that surrounds the LLM with rigorous guardrails:
-
-| Common Text-to-SQL Limitations | Agentic Data Lakehouse Solution |
+| Typical failure | How this project handles it |
 | :--- | :--- |
-| **Unchecked Execution** | **AST Safety Guard**: Parses every query with `sqlglot` prior to execution; rejects DDL/DML, multi-statement queries, TVFs, and enforces Gold schema isolation. |
-| **Hallucinated Numbers** | **Numeric Grounding**: Regex-based verification guarantees every figure in the narrative matches executed query results within tolerance. |
-| **Wrong Metric Calculations** | **Semantic Registry & Sufficiency**: Maps terms to validated SQL formulas; refuses queries when essential data (e.g., COGS for profit) is absent. |
-| **Misleading Root-Cause Narratives** | **Honest Narrative Guard**: Prohibits blaming single brands if the top 5 account for < 20% of net change; discloses calendar disparities (31 vs 30 days). |
-| **Expensive Narration Latency** | **Table-First Fast Path**: Renders ranking queries directly as formatted Markdown tables with Plotly charts (bypassing LLM narration, saving 70% tokens). |
+| Unchecked SQL execution | **AST Safety Guard** (`sqlglot`): single `SELECT` only, Gold schema only, no DDL/DML or table-valued functions, automatic `LIMIT`. |
+| Made-up numbers | **Numeric grounding**: every figure in a narrative must match executed query results. |
+| Part of the question silently dropped | **Derived-measure handling**: "% of total", "share", "contribution" become SQL columns; if a requested column is missing from the result, the answer says so. |
+| Wrong metric for the question | **Metric-aware diagnosis**: a low *order count* is never blamed on a small *basket size*. |
+| Confident stories from noise | **Variability check**: the "biggest weekly drop" is compared with normal week-to-week swing, and reported as likely noise when it is. |
+| Small samples treated as proof | **Confidence by sample size**: rate-based findings need a Wilson-interval test below 30 orders. |
+| Stale cached answers | **Freshness markers**: every cache is invalidated when the pipeline rewrites Gold data. |
+| Slow, expensive LLM chains | **Deterministic fast paths**: rankings, period comparisons, enrichment and diagnosis run as code, with 0 LLM calls where possible. |
 
 ---
 
-## 🏗️ End-to-End System Architecture
+## 🎬 See it in action
 
-The entire platform connects raw food-delivery operational data to business decision-makers through a four-tier architecture:
+### "Which week had the biggest week-over-week decrease in revenue?"
+
+This question shape is handled entirely by code (**0 LLM calls**). Real output on the project dataset:
+
+```text
+Largest decrease in revenue (week-over-week)
+Week 2024-04-01 → 2024-04-07 vs 2024-03-25 → 2024-03-31: 23,753,785 vs 24,079,033
+— change -325,248 (-1.35%).
+Definition: largest absolute change between two consecutive full weeks
+(129 comparisons, data 2024-01-01 to 2026-06-30). Partial periods are excluded.
+
+Biggest contributors (brand level)
+| Restaurant | prev week | this week | Change  | % change | Share of total decline |
+| KFC        | 217,256   | 186,014   | -31,242 | -14.4%   | +9.6%                  |
+| Subway     | 141,816   | 112,491   | -29,325 | -20.7%   | +9.0%                  |
+| ...        |           |           |         |          |                        |
+
+Measured breakdown: orders -23 (-0.0%), average order value -6.4 (-1.3%)
+Arithmetic split: order-volume effect -11,221 + basket-size effect -314,027 = -325,248
+
+Limits of this analysis
+- This change (1.35%) is 1.8x the typical week-to-week swing (standard deviation 0.75%).
+  With 129 comparisons, an extreme this size is expected by chance alone,
+  so there may be no specific cause to find.
+- This is association, not causation. The data has no traffic, marketing,
+  holiday/season, weather or live-pricing information.
+```
+
+The week, both revenue values, the change and the comparison count were cross-checked against an independent Python computation from daily revenue and matched exactly.
+
+### "Show me the top 10 restaurants with their percentage contribution to overall revenue"
+
+The share is computed in SQL as a window over the grouped total, evaluated *before* `LIMIT`, so it is a share of **all** restaurants, not just the ten shown:
+
+```sql
+SELECT dr.restaurant_name,
+       SUM(fo.sales_amount) AS revenue,
+       ROUND(100.0 * SUM(fo.sales_amount) / NULLIF(SUM(SUM(fo.sales_amount)) OVER (), 0), 2) AS pct_of_total
+FROM workspace.zomato_gold.fact_orders AS fo
+JOIN workspace.zomato_gold.dim_resturant AS dr ON fo.restaurant_id = dr.restaurant_id
+GROUP BY 1
+ORDER BY revenue DESC, 1 ASC
+LIMIT 10
+```
+
+### "Why so few orders?" (follow-up on the restaurants on screen)
+
+The diagnosis measures each restaurant against the platform, its city and its cuisine, decomposes **orders = branches × orders per branch**, ranks root-cause candidates with a confidence level, attaches an action with a target KPI to each, and lists what was checked and found normal.
+
+---
+
+## 🔄 How a question is answered
+
+```mermaid
+flowchart TD
+    Q["User question (EN / AR)"] --> R{"Router"}
+    R -->|"deterministic: biggest week/month change"| PC["PERIOD_CHANGE<br/>code only, 0 LLM calls"]
+    R -->|"why / add city & rating on shown rows"| FU["FOLLOWUP<br/>diagnosis & enrichment"]
+    R -->|"opinion / decision"| AD["ADVISOR<br/>answers from stored rows only"]
+    R -->|"data question"| AN["ANALYSIS<br/>guarded analyst pipeline"]
+    R -->|"chit-chat / general"| GE["GENERAL"]
+
+    AN --> FP{"Known shape?<br/>ranking, single metric"}
+    FP -->|"yes"| DET["Deterministic SQL<br/>no planner, no narration"]
+    FP -->|"no"| PL["LLM planner + SQL writer"]
+    DET --> G
+    PL --> G{"AST SQL Guard"}
+    PC --> G
+    FU --> G
+    G -->|"rejected"| REP["Self-repair (max 3)"] --> G
+    G -->|"safe"| EX[("Databricks<br/>read-only, cached")]
+    EX --> V["Validation & numeric grounding"]
+    V --> OUT["Table / chart / narrative<br/>+ 'How I got this' audit panel"]
+```
+
+Every route that touches data goes through the **same** safety guard and result cache. See [ARCHITECTURE.md](ARCHITECTURE.md) for node-level detail.
+
+---
+
+## 🔍 Root-cause analysis you can trust
+
+Root-cause questions are where analysts usually lose trust, so each rule below is enforced in code and covered by tests:
+
+- **Correct period.** Weeks are whole Monday–Sunday weeks and months are calendar months, inside the data's actual coverage. A partial first or last period can never be reported as "the biggest drop".
+- **Exact arithmetic.** Changes, percentages and shares come from SQL. The revenue split into *order-volume* and *basket-size* effects is an exact identity (`R1 − R0 = (o1 − o0)·a0 + o1·(a1 − a0)`).
+- **Evidence for every claim.** Each explanation cites a measured figure and a benchmark (platform, city, or cuisine).
+- **Correlation vs. causation.** Answers state that the figures describe *what changed*, not proven cause.
+- **Admits insufficient data.** If the extreme change is within normal variation, there are too few orders, or a column is empty (for example `cost` is NULL for 100% of restaurants), the answer says so instead of inventing a reason.
+- **Regression to the mean.** If the previous period was unusually high, the answer notes that part of the drop is a return to normal.
+- **Metric-aware.** Diagnosing a low *order count* uses `orders = branches × orders per branch` and never recommends "raise basket size".
+
+---
+
+## 🛡️ Safety & zero-hallucination guardrails
 
 ```mermaid
 flowchart LR
-    subgraph S1 ["1. Storage & Ingestion"]
-        direction TB
-        Raw[("Raw Data<br/>(10M Orders, Menus)")]
-        Bronze[("Bronze Delta<br/>Raw Landing")]
-        Silver[("Silver Delta<br/>Cleaned & Typed")]
-        Gold[("Gold Delta<br/>Kimball Star Schema")]
-        Raw --> Bronze --> Silver --> Gold
-    end
-
-    subgraph S2 ["2. Pipeline & Modeling"]
-        direction TB
-        Airflow["Airflow Daily DAG"]
-        dbt["dbt Core Models"]
-        Sentiment["Batch AI Sentiment<br/>(Groq / Llama-3)"]
-        Airflow --> dbt --> Sentiment --> Gold
-    end
-
-    subgraph S3 ["3. Agentic AI Analyst"]
-        direction TB
-        Router["Master Router"]
-        ASTGuard["AST SQL Guard<br/>(sqlglot)"]
-        Grounding["Reconciliation &<br/>Numeric Grounding"]
-        Router --> ASTGuard --> Grounding
-    end
-
-    subgraph S4 ["4. User Delivery"]
-        direction TB
-        UI["Streamlit Web App"]
-        Viz["Interactive Plotly Charts"]
-        Audit["Audit Panel<br/>('How I Got This')"]
-        UI --- Viz
-        UI --- Audit
-    end
-
-    Gold <-->|"Read-Only SQL (Least Privilege)"| S3
-    S3 <-->|"Natural Language (EN / AR)"| S4
+    Q["Question"] --> B["Token budget<br/>60k / session · 180k / day"]
+    B --> G{"AST SQL Guard<br/>single SELECT · Gold only · LIMIT"}
+    G --> DB[("Databricks service principal<br/>SELECT on Gold only")]
+    DB --> RV["Result validation<br/>empty / NULL / zero classified"]
+    RV --> NG["Numeric grounding<br/>every number traceable to SQL"]
+    NG --> A["Verified answer"]
 ```
+
+- **Least privilege:** a dedicated service principal with read-only access to `workspace.zomato_gold.*` ([`scripts/databricks_grants.sql`](scripts/databricks_grants.sql)).
+- **AST SQL Guard:** parses every statement with `sqlglot` (Databricks dialect), blocks DDL/DML, multi-statement input and functions such as `read_files`, and injects `LIMIT 10000`. SQL built by code (period analysis, diagnosis, enrichment) goes through the same guard; values interpolated into SQL are strictly validated (for example dates must match `YYYY-MM-DD` in full).
+- **Honest empty results:** no rows, all-NULL, and all-zero results are explained deterministically with the warehouse's real date coverage, and never narrated by the LLM.
+- **Proportion discipline:** the narrative may not call something the "bulk" or "majority" unless SQL returned a share above 50%.
+- **Resilience:** 30 s statement timeout, a bounded connection pool with reconnect-and-retry, and a circuit breaker with provider fallbacks.
+- **Auditability:** every answer has a **"How I got this"** panel with the executed SQL, row counts and per-node latency/LLM telemetry.
 
 ---
 
-## 🔄 The Agentic Query Engine
+## ⚡ Caching & data freshness
 
-Rather than passing raw prompts directly to SQL, the analytical pipeline executes a transparent 5-step lifecycle:
+| Cache | Key | Lifetime | Invalidated by |
+| :--- | :--- | :--- | :--- |
+| **Query results** | SHA-256 of the `sqlglot`-normalized SQL | 1 h (`QUERY_CACHE_TTL_SECONDS`) | Pipeline marker, TTL, size/entry caps |
+| **LLM responses** | node + model + effort + full prompt | 24 h | Any prompt change (schema, metrics) changes the key |
+| **Gold schema** | in-process | 1 h | Pipeline marker |
+| **Data coverage** (first/last order date) | in-process | 1 h | Pipeline marker |
 
-```mermaid
-flowchart LR
-    Step1["1. Intent & Sufficiency<br/>• Maps metrics & grains<br/>• Rejects missing data"] 
-    --> Step2["2. Dynamic SQL Planner<br/>• Single-pass period CTEs<br/>• Brand-level grouping"]
-    --> Step3{"3. AST SQL Guard<br/>• SELECT only<br/>• Gold schema only<br/>• Injects LIMIT"}
-    --> Step4["4. Databricks Run<br/>• Read-only principal<br/>• 30s statement timeout"]
-    --> Step5{"5. Verification<br/>• Reconciles totals<br/>• Numeric grounding"}
-    --> Step6["6. Verified Output<br/>• Table / Chart / Audit"]
-
-    Step3 -- "Rejected" --> Repair["Self-Repair Loop<br/>(Max 3 Retries)"] --> Step3
-    Step5 -- "Discrepancy" --> Repair
-```
-
-### Stage Responsibilities:
-1. **Intent & Sufficiency Analyzer**: Extracts target metrics, dimensions, filters, and grain (Brand vs. Branch). Verifies data availability before writing code.
-2. **Dynamic SQL Planner**: Employs single-pass conditional aggregation CTEs for period comparisons and trends.
-3. **AST SQL Guard**: Parses syntax via `sqlglot` (Databricks dialect); injects `LIMIT 10000` and validates table references.
-4. **Execution Pool**: Reuses thread-safe, long-lived Databricks connections with automatic reconnection and query timeouts.
-5. **Reconciliation & Numeric Grounding**: Validates that derived metrics are non-null and that entity deltas equal overall change before generating final outputs.
+- Query-cache writes are atomic, there is an in-memory LRU in front of the disk files, and identical concurrent queries are coalesced into one execution.
+- **Freshness contract:** the Airflow DAG writes `metadata/last_ai_run.txt` after **both** `dbt_build_core` and `dbt_build_ai`. Anything cached before that timestamp is treated as stale, even if the AI steps later fail.
 
 ---
 
-## 📊 Data Platform & Lakehouse
+## 🔭 Observability
 
-The underlying data warehouse is implemented on Databricks Delta Lake, transformed using **dbt**, and modeled into a Kimball Star Schema.
+- **`eval/llm_telemetry.jsonl`**: one record per LLM call (node, provider, model, fallback flag, retries, prompt/completion/reasoning tokens, `finish_reason`, wall time).
+- **`eval/executed_sql.jsonl`**: one record per executed or cache-served query (question, SQL, cache hit, row count, seconds, error), so empty or wrong results can be audited after the fact.
+- The UI's "LLM calls" counter reflects real telemetry records, so cached and deterministic turns show 0.
+- Tests redirect both logs to temporary files, so test runs never pollute real telemetry.
 
-### dbt Medallion Lineage (Bronze ➔ Silver ➔ Gold)
-Full automated lineage showing raw landing sources transforming into cleansed silver tables, and materializing into Kimball star schema facts and dimensions:
+---
+
+## 🏛️ Data platform (dbt + Medallion)
+
+Raw operational data is transformed with **dbt** into a Kimball star schema on Databricks Delta Lake. Facts are incremental merges (timestamp watermark with a 3-day lookback), so daily runs stay cheap.
 
 <div align="center">
   <img src="docs/images/dbt_lineage.png" alt="dbt Lineage Graph" width="95%" />
 </div>
 
-### Star Schema Entity-Relationship Model
-Optimized for high-concurrency analytical queries across 10+ million records:
-
 <div align="center">
   <img src="docs/images/data_model.png" alt="Star Schema Data Model" width="85%" />
 </div>
 
-| Table | Grain | Key Columns | Row Count |
-| :--- | :--- | :--- | :--- |
-| **`fact_orders`** | One row per order | `order_id`, `user_id`, `restaurant_id`, `date_id`, `sales_amount`, `discount` | **10,000,000** |
-| **`fact_order_items`** | One row per line item | `order_id`, `food_id`, `quantity`, `price` | **~23,000,000** |
-| **`dim_resturant`** | One row per restaurant branch | `restaurant_id`, `restaurant_name` (Brand), `city`, `rating`, `affordability_tier` | **148,541** |
-| **`dim_menu`** | One row per menu item | `menu_id`, `restaurant_id`, `item_name`, `veg_or_non_veg`, `cuisine` | **1,179,936** |
-| **`dim_users`** | One row per customer | `user_id`, `age_group`, `gender`, `occupation`, `monthly_income` | **100,000** |
-| **`dim_date`** | One row per calendar date | `date_id`, `full_date`, `year`, `month_name`, `day_type` | **912** |
+| Table | Grain | Key columns | Rows |
+| :--- | :--- | :--- | ---: |
+| `fact_orders` | one row per order | `order_id`, `user_id`, `restaurant_id`, `date_id`, `sales_amount`, `discount` | 10,000,000 |
+| `fact_order_items` | one row per line item | `order_id`, `food_id`, `quantity`, `price` | ~23,000,000 |
+| `dim_resturant` | one row per **branch** (`restaurant_name` is the brand) | `restaurant_id`, `restaurant_name`, `city`, `rating`, `cuisine` | 148,541 |
+| `dim_menu` | one row per menu item | `menu_id`, `restaurant_id`, `item_name`, `cuisine` | 1,179,936 |
+| `dim_users` | one row per customer | `user_id`, `age_group`, `occupation`, `customer_segment` | 100,000 |
+| `dim_date` | one row per date | `date_id`, `full_date`, `year`, `month_number` | 912 |
 
-### Automated Data Quality (dbt Tests)
-Every model is tested for primary key uniqueness, referential integrity, and not-null constraints:
+Brand-level questions always group by `restaurant_name`; customers are grouped by `user_id` *and* name because names are not unique.
 
 <div align="center">
   <img src="docs/images/dbt_tests.png" alt="dbt Test Suite" width="95%" />
@@ -157,231 +220,107 @@ Every model is tested for primary key uniqueness, referential integrity, and not
 
 ---
 
-## 🕒 Pipeline Orchestration (Apache Airflow)
-
-The data pipeline runs automatically via a scheduled Apache Airflow DAG (`zomato_ai_pipeline_databricks`) in Docker:
+## 🕒 Pipeline orchestration (Airflow)
 
 <div align="center">
   <img src="docs/images/airflow_dag.png" alt="Airflow Pipeline DAG" width="95%" />
 </div>
 
-1. **`dbt_build_core`**: Executes transformation models across Bronze, Silver, and core Gold layers.
-2. **`enrich_reviews`**: A high-throughput batch worker connecting to Groq / Llama-3 to classify customer sentiment (Positive, Negative, Neutral).
-3. **`dbt_build_ai`**: Merges sentiment metrics into Gold dimension tables to correlate customer satisfaction with restaurant revenue.
-
----
-
-## 🛡️ Security, Governance & Zero-Hallucination Guardrails
+DAG `zomato_ai_pipeline_databricks` (daily, `max_active_runs=1`, retries with exponential backoff, per-task and per-run timeouts):
 
 ```mermaid
 flowchart LR
-    Query["User Question"] --> Budget["1. Token Budget & Rate Limiter<br/>(25k Session / 100k Daily)"]
-    Budget --> Guard{"2. AST SQL Guard<br/>(Single SELECT, No DDL, LIMIT)"}
-    Guard --> DB[("3. Databricks Service Principal<br/>(SELECT Only on Gold Schema)")]
-    DB --> Reconcile["4. Reconciliation Validator<br/>(Deltas = Total Delta)"]
-    Reconcile --> Grounding["5. Numeric Grounding Engine<br/>(Every number traceable to SQL)"]
-    Grounding --> Verified["6. Verified Output"]
+    core["dbt_build_core<br/>Bronze → Silver → Gold<br/>+ write freshness marker"] --> enrich["enrich_reviews<br/>batch sentiment (LLM)"]
+    core --> seg["ml_build_segments<br/>K-Means customer segments"]
+    enrich --> ai["dbt_build_ai<br/>AI tables into Gold<br/>+ write freshness marker"]
+    seg --> ai
 ```
 
-- **Least Privilege Access**: Dedicated service principal configured via [`scripts/databricks_grants.sql`](scripts/databricks_grants.sql) with read-only access limited strictly to `workspace.zomato_gold.*`.
-- **AST SQL Guard**: Prevents SQL injection, multiple statements, and table-valued functions (`read_files`).
-- **Gated ETL Agent**: ETL extraction is disabled by default (`ENABLE_ETL_AGENT=false`) and protected by SSRF filtering (blocks private IPs, loopback, and metadata endpoints).
-- **Auditability**: Every generated answer contains a **"How I got this"** expander showing the exact SQL query executed, execution time, and row count.
+- **`enrich_reviews`**: incremental, de-duplicated, batched (25 reviews/request) async sentiment classification with bounded concurrency and `retry-after` backoff.
+- **`ml_build_segments`**: K-Means segmentation (e.g. *High Value*, *Loyal*, *Occasional*, *At Risk*) loaded in bulk via Parquet and a Unity Catalog volume, materialised as `ai_customer_segments`.
 
 ---
 
-## 📈 Real-World Walkthrough: Investigating a Sales Decline
+## 🧪 Testing
 
-**User Question:** *"Why did sales decline? Which restaurant contributed most?"*
-
-### 1. Dynamic Single-Pass CTE Execution
-The agent queries actual period dates from `fact_orders` and performs conditional brand aggregation in a single query:
-
-```sql
-WITH date_bounds AS (
-    SELECT MAX(dd.full_date) AS max_date 
-    FROM workspace.zomato_gold.fact_orders fo 
-    JOIN workspace.zomato_gold.dim_date dd ON fo.date_id = dd.date_id
-),
-periods AS (
-    SELECT 
-        DATE_TRUNC('MONTH', max_date) AS cur_start,
-        max_date AS cur_end,
-        ADD_MONTHS(DATE_TRUNC('MONTH', max_date), -1) AS prev_start,
-        LAST_DAY(ADD_MONTHS(DATE_TRUNC('MONTH', max_date), -1)) AS prev_end
-    FROM date_bounds
-),
-brand_sales AS (
-    SELECT 
-        dr.restaurant_name,
-        SUM(CASE WHEN dd.full_date BETWEEN p.cur_start AND p.cur_end THEN fo.sales_amount ELSE 0 END) AS sales_cur,
-        SUM(CASE WHEN dd.full_date BETWEEN p.prev_start AND p.prev_end THEN fo.sales_amount ELSE 0 END) AS sales_prev
-    FROM workspace.zomato_gold.fact_orders fo
-    JOIN workspace.zomato_gold.dim_date dd ON fo.date_id = dd.date_id
-    JOIN workspace.zomato_gold.dim_resturant dr ON fo.restaurant_id = dr.restaurant_id
-    CROSS JOIN periods p
-    GROUP BY dr.restaurant_name
-)
-SELECT 
-    restaurant_name, sales_cur, sales_prev,
-    (sales_cur - sales_prev) AS delta,
-    ((sales_cur - sales_prev) / NULLIF(sales_prev, 0)) * 100 AS pct_change,
-    ((sales_cur - sales_prev) / NULLIF(SUM(sales_cur - sales_prev) OVER (), 0)) AS contribution_to_change
-FROM brand_sales
-ORDER BY delta ASC
-LIMIT 10;
-```
-
-### 2. Live Verified Output & Honest Narrative
-```text
-Total sales fell from 234,738,456 to 224,736,724 (-10,001,732, or -4.26%).
-
-• Top Decliners:
-  1. KFC: 1,921,496 vs 2,084,094 (-162,598 | -7.80%)
-  2. Domino's Pizza: 1,620,782 vs 1,746,976 (-126,194 | -7.22%)
-  3. Pizza Hut: 1,471,770 vs 1,581,232 (-109,462 | -6.92%)
-  4. Subway: 1,209,340 vs 1,290,529 (-81,189 | -6.29%)
-  5. Behrouz Biryani: 1,176,723 vs 1,249,456 (-72,733 | -5.82%)
-
-• Honest Findings:
-  1. Broad Distribution: The top 5 decliners represent only 5.52% (-552,176) of the total drop, 
-     meaning the decline is distributed across thousands of restaurants rather than a single brand.
-  2. Calendar Normalization: May had 31 days (avg 7,572,208/day) while June had 30 days (avg 7,491,224/day). 
-     On an average daily basis, sales declined by only -1.07%.
-```
-
----
-
-## 🧪 Automated Testing Suite
-
-The repository includes **83 automated unit, integration, and security tests** guaranteeing zero regressions:
+**315 tests** across 26 files cover security (AST guard), numeric grounding, routing, deterministic SQL, caching, resilience, diagnosis accuracy, period analysis and observability.
 
 ```bash
-python -m pytest tests/ -v
+python -m pytest tests -q
 ```
 
-```text
-======================= 83 passed, 6 warnings in 28.72s =======================
-```
-
-- **Security & AST Guard (11 tests)**: Blocks unauthorized schemas, TVFs, DDL/DML, and injection attempts.
-- **SSRF & Network Defense (6 tests)**: Blocks private IPs, link-local metadata addresses, and path traversal.
-- **Reconciliation Validator (3 tests)**: Catches all-NULL derived metrics and delta reconciliation mismatches.
-- **Numeric Grounding (12 tests)**: Validates exact numbers, Arabic-Indic numerals, and scaling units (`14M`).
-- **Resilience & Rate Limits (5 tests)**: Simulates 429 quota limits, connection pool drops, and automatic state reset.
+Notable regression suites: derived measures (`test_derived_measures.py`), period-over-period analysis (`test_period_change.py`), diagnosis accuracy (`test_diagnosis_accuracy.py`), cache freshness (`test_cache_freshness.py`) and observability (`test_observability.py`). `tests/conftest.py` isolates caches and telemetry files so tests never touch real runtime data.
 
 ---
 
-## 💻 Getting Started & Quickstart
+## 💻 Getting started
 
-### 1. Prerequisites
-- Python 3.12+
-- Databricks SQL Warehouse with Gold schema
-- Groq API Key (OpenRouter optional)
-- Docker (for Airflow pipeline)
+### Prerequisites
+Python 3.12+ · a Databricks SQL warehouse with the Gold schema · a Groq API key (OpenRouter optional fallback) · Docker (for Airflow)
 
-### 2. Installation
+### Install
 ```bash
 git clone https://github.com/shehapsherif11-bit/Agentic-Data-Lakehouse.git
 cd Agentic-Data-Lakehouse
 
 python -m venv venv
-.\venv\Scripts\activate   # Linux/macOS: source venv/bin/activate
-
+.\venv\Scripts\activate        # Linux/macOS: source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 3. Environment Configuration
-Create a `.env` file in the root directory:
+### Configure
+Create a `.env` in the project root (it is git-ignored):
 ```env
-DATABRICKS_HOST=your-databricks-workspace.cloud.databricks.com
+DATABRICKS_HOST=your-workspace.cloud.databricks.com
 DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/your-warehouse-id
 DATABRICKS_TOKEN=dapi...
 GROQ_API_KEY=gsk_...
-ENABLE_ETL_AGENT=false
 ```
 
-### 4. Run the Streamlit Application
-```bash
-streamlit run app.py
-```
+Optional tuning (defaults in parentheses): `STATEMENT_TIMEOUT_SECONDS` (30), `DB_POOL_SIZE` (3), `QUERY_CACHE_TTL_SECONDS` (3600), `LLM_CACHE_TTL_SECONDS` (86400), `SESSION_TOKEN_LIMIT` (60000), `DAILY_TOKEN_LIMIT` (180000), `ENRICH_MAX_REVIEWS` (500; `0` = all), `AI_RUN_MARKER_PATH` (`metadata/last_ai_run.txt`).
 
-### 5. Run Lakehouse Transformations (dbt)
+### Run
 ```bash
-cd zomato_dbt
-$env:PYTHONUTF8=1
-dbt debug
-dbt test
-dbt build
+streamlit run app.py                 # chat UI
+cd zomato_dbt && dbt build           # build the lakehouse models
 ```
 
 ---
 
-## 📂 Project File Structure
+## 📂 Project structure
 
 ```text
 Agentic-Data-Lakehouse/
-├── app.py                          # Streamlit interactive chat UI
-├── cli.py                          # Direct terminal CLI for fast extraction
-├── requirements.txt                # Production dependencies
-├── .gitignore                      # Environment, logs, and cache exclusions
-│
-├── src/                            # Production source code
-│   ├── agent/                      # LangGraph Multi-Agent Architecture
-│   │   ├── analyst_graph.py        # 14-node guarded analytical engine
-│   │   ├── analyst_prompts.py      # System prompts with B-3/B-5 rules
-│   │   ├── analyst_state.py        # TypedDict state & frozen Evidence dataclass
-│   │   ├── etl_agent.py            # Gated ETL agent
-│   │   ├── llm_factory.py          # Multi-provider LLM factory & fallbacks
-│   │   ├── metrics_registry.py     # Schema catalog & lean context
-│   │   ├── numeric_grounding.py    # Deterministic numeric grounding verifier
-│   │   ├── router_graph.py         # Master router workflow
-│   │   ├── router_config.py        # Routing thresholds & configurations
-│   │   ├── sql_safety_guard.py     # AST-based SQL guard (sqlglot)
-│   │   ├── telemetry.py            # Latency and token tracking hooks
-│   │   ├── token_budget.py         # Session and daily token budget manager
-│   │   └── viz_engine.py           # Automated Plotly chart generator
-│   ├── tools/                      # SSRF-protected data tools
-│   └── utils/                      # Databricks connection pool & retry logic
-│
-├── zomato_dbt/                     # dbt Lakehouse modeling (Bronze -> Silver -> Gold)
-│   ├── models/
-│   │   ├── silver/                 # Cleaned and deduplicated models
-│   │   └── gold/                   # Kimball star schema (fact_orders, dims)
-│   ├── dbt_project.yml
-│   └── profiles.yml
-│
-├── airflow/                        # Data pipeline orchestration (Dockerized)
-│   ├── dags/                       # Airflow DAGs & batch LLM sentiment tasks
-│   ├── Dockerfile                  # Airflow custom container image
-│   └── docker-compose.yaml         # Multi-service stack definition
-│
-├── scripts/                        # Database security and administration
-│   └── databricks_grants.sql       # Least-privilege read-only permissions
-│
-├── tests/                          # Automated test suite (83 tests, 100% pass)
-│
-└── docs/                           # Architecture documentation & screenshots
-    └── images/                     # System screenshots & ER diagrams
-        ├── airflow_dag.png
-        ├── dbt_lineage.png
-        ├── dbt_tests.png
-        ├── data_model.png
-        └── data_volume.png
+├── app.py                        # Streamlit chat UI + audit panel
+├── ARCHITECTURE.md · DECISIONS.md
+├── src/
+│   ├── agent/
+│   │   ├── router_graph.py       # Master router (ANALYSIS · FOLLOWUP · ADVISOR · PERIOD_CHANGE · GENERAL)
+│   │   ├── analyst_graph.py      # Guarded analytical pipeline (LangGraph)
+│   │   ├── period_change.py      # Deterministic "biggest week/month change" analysis
+│   │   ├── diagnostics.py        # Root-cause scoring, decomposition, confidence
+│   │   ├── followups.py          # Diagnosis & enrichment of restaurants on screen
+│   │   ├── advisor.py            # Evidence-bound opinion/decision answers
+│   │   ├── query_intent.py       # Deterministic top-N, direction, derived measures
+│   │   ├── metrics_registry.py   # Metric catalog, sufficiency checks
+│   │   ├── sql_safety_guard.py   # AST-based SQL guard (sqlglot)
+│   │   ├── numeric_grounding.py  # Verifies narrative numbers against results
+│   │   ├── result_classifier.py  # Empty / NULL / zero explanations
+│   │   ├── ranking_text.py       # Table-first ranking answers
+│   │   ├── query_cache.py · llm_cache.py
+│   │   ├── token_budget.py · telemetry.py · llm_factory.py
+│   │   └── viz_engine.py         # Plotly charts
+│   └── utils/                    # Databricks pool, concurrency, pipeline marker
+├── zomato_dbt/                   # dbt models: silver/ and gold/ (star schema)
+├── airflow/                      # Dockerized DAG + AI tasks (sentiment, K-Means)
+├── scripts/databricks_grants.sql # Least-privilege permissions
+├── tests/                        # 315 tests
+└── docs/images/                  # Lineage, ERD, DAG screenshots
 ```
 
 ---
 
-## 👨‍💻 Author & Contact
+## 👨‍💻 Author
 
-**Shehab El-Batanouny**  
-*Data Analyst & Data Engineering Specialist*  
-- **GitHub:** [@shehapsherif11-bit](https://github.com/shehapsherif11-bit)  
-- **LinkedIn:** [Shehab El-Batanouny](https://www.linkedin.com/in/shehapsherif/)  
-- **Project Repository:** [Agentic-Data-Lakehouse](https://github.com/shehapsherif11-bit/Agentic-Data-Lakehouse)
-
- 
- # #   N e w   F e a t u r e s 
- -   * * M L   B a t c h   S e g m e n t a t i o n : * *   C u s t o m e r   c l u s t e r i n g   ( K - M e a n s )   v i a   A i r f l o w   i n t o   d i m _ u s e r s . 
- -   * * P e r f o r m a n c e   C a c h i n g : * *   S H A 2 5 6 - n o r m a l i z e d   S Q L   c a c h i n g   b o u n d e d   b y   d b t _ b u i l d _ a i   r u n s .  
- 
+**Shehab El-Batanouny** — Data Analyst & Data Engineering Specialist
+[GitHub @shehapsherif11-bit](https://github.com/shehapsherif11-bit) · [LinkedIn](https://www.linkedin.com/in/shehapsherif/)
