@@ -5,6 +5,7 @@ zomato_dbt:
       type: databricks
       catalog: workspace
       schema: zomato
+      threads: 8   # independent silver/gold models build in parallel (default is 1)
       host: "{{ env_var('DATABRICKS_HOST') }}"
       http_path: "{{ env_var('DATABRICKS_HTTP_PATH') }}"
       token: "{{ env_var('DATABRICKS_TOKEN') }}"

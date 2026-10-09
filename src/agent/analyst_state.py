@@ -26,13 +26,18 @@ class AnalystState(TypedDict):
     previous_question: str
     previous_plan: dict
     previous_results: list
-    
+    previous_intent: dict
+
     # Intent Analysis
     intent: dict  # {type, metrics, dimensions, filters, time_period, granularity, comparisons, is_followup, is_driver_question, original_question}
     
-    # Metric Resolution 
+    # Intent computed speculatively by the router (in parallel with route classification)
+    prefetched_intent: dict
+
+    # Metric Resolution
     resolved_metrics: list  # [{name, status, definition, missing_reason}]
     data_sufficiency: dict  # {sufficient, available, missing, warnings}
+    proxy_note: str         # set when an unavailable metric (profit) is answered with a disclosed proxy (revenue)
     
     # Analysis Plan
     analysis_plan: dict  # {goal, steps: [{description, query_purpose}], needs_driver_analysis, needs_temporal_comparison}
@@ -60,6 +65,9 @@ class AnalystState(TypedDict):
     # Output
     evidence_object: dict
     final_answer: str
+    cache_hit: bool          # True only if every executed query came from the result cache
+    cache_hits: int
+    cache_misses: int
     
     # Control
     repair_attempts: int

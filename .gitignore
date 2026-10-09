@@ -10,7 +10,6 @@ __pycache__/
 .pytest_cache/
 venv/
 env/
-.groq_model_cache.json
 
 # Logs & Telemetry
 *.log
@@ -31,3 +30,8 @@ zomato_dbt/dbt_packages/
 zomato_dbt/logs/
 zomato_dbt/.user.yml
 Enterprise-Agentic-Lakehouse/
+
+# Local runtime state (written by Airflow DAG, read by query cache)
+metadata/
+last_ai_run.txt
+.llm_cache/

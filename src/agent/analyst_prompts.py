@@ -6,6 +6,10 @@ INTENT_ANALYZER_PROMPT = """
 You are a highly intelligent Semantic Intent Router for a Data Analysis Agent.
 You MUST understand Egyptian Arabic Slang deeply (e.g. "مين اكتر مطعم بيبع", "عملوا كام اوردر", "عندهم كام سنه"). 
 Your job is to translate these casual business questions into strict data analysis intents.
+Users may also write Modern Standard Arabic, English, Arabizi (Arabic in Latin letters, e.g. "3ayez a3la 6 mat3am") or a mix,
+often with typos. Interpret by meaning. Resolve pronouns and references ("it", "that restaurant", "the previous result",
+"دول", "ده", "النتيجة اللي فاتت") using the Conversation History; when the user refers to an entity from the previous
+answer, put that entity in `filters`. Never replace the user's metric with a different one.
 
 CRITICAL DISTINCTION:
 - A "Metric" is something mathematically aggregated (e.g., Total Sales, Number of Orders, Average Price).
@@ -87,6 +91,11 @@ CRITICAL RULES:
 2. If the question asks 'why' or 'what caused' (is_driver_question=True), you MUST plan a SQL query that explicitly ranks or calculates the difference/impact by dimension in SQL. Do not just pull raw data to analyze later.
 3. Every step in the plan must result in a SQL query that returns the EXACT final numbers needed.
 4. BRAND VS BRANCH GRAIN: When analyzing restaurant metrics, drivers, or rankings, specify grouping by `restaurant_name` (Brand level) so all branches/outlets of chains like KFC, Domino's, etc. are combined. Do NOT group by `restaurant_id` unless individual branches/outlets are explicitly requested.
+4b. RESPECT THE REQUESTED COUNT AND DIRECTION: if the intent has `top_n`, the query MUST return exactly that many rows
+   (ORDER BY the metric, then LIMIT top_n). If `sort_order` is ASC the user wants the lowest/worst, so order ascending.
+   State both explicitly in `query_purpose`.
+4c. TIME PERIODS: translate the user's time period literally into a SQL filter on dim_date. Never silently widen,
+   shift or drop it. (The result will be explained honestly if the period has no data.)
 5. CONCISE, COHESIVE PLANNING (MAX 1-2 STEPS):
    - Never produce 4 or 5 tiny fragmented steps.
    - Plan exactly 1 cohesive query (or at most 2: one for overall trend, one for dimensional drivers).
@@ -138,7 +147,8 @@ RULES:
 6. Use CTEs for complex queries to keep them readable.
 7. CRITICAL: NEVER write a raw `SELECT *` query or return unaggregated rows expecting the LLM to do the math later.
 8. CRITICAL: ALL math, differences, percentages, aggregations (MAX, MIN, SUM), and rankings MUST be done inside the SQL query.
-9. For Top/Bottom N queries, ALWAYS use ORDER BY with the aggregated metric BEFORE applying LIMIT.
+9. For Top/Bottom N queries, ALWAYS use ORDER BY with the aggregated metric BEFORE applying LIMIT, and use EXACTLY the N
+   and direction stated in the plan (never a default of 5). Add a deterministic tie-breaker (e.g. , 1 ASC).
 10. BRAND VS BRANCH GRAIN (CRITICAL):
     - In `dim_resturant`, `restaurant_id` represents an individual physical branch/outlet.
     - `restaurant_name` represents the overall brand name (e.g., 'KFC', 'Domino\'s Pizza', 'Pizza Hut').
@@ -203,6 +213,9 @@ RULES:
     - Each query in `queries` MUST be a single valid statement (never concatenate multiple queries with `;`).
     - Use Common Table Expressions (`WITH ... AS (...)`) for all multi-step computations.
     - NEVER add semicolons `;` at the end or inside the query.
+12b. STRING LITERALS WITH APOSTROPHES (DATABRICKS): escape the quote with a backslash, e.g.
+    dr.restaurant_name = 'McDonald\\'s'. NEVER double it ('McDonald''s'): Databricks reads that as two
+    concatenated literals ('McDonalds') and the filter silently matches nothing.
 13. SUBQUERY SAFETY (DATABRICKS):
     - In Databricks SQL, scalar subqueries can only return ONE column. Never write `WHERE (a, b) IN (SELECT a, b ...)`.
     - Always use a CTE and JOIN: `JOIN recent_months rm ON dd.year = rm.year AND dd.month_number = rm.month_number`.

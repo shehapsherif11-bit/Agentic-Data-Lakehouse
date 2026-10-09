@@ -43,6 +43,7 @@ AUDIT_LOG_PATH = os.path.join(
     "eval",
     "llm_telemetry.jsonl"
 )
+SQL_LOG_PATH = os.path.join(os.path.dirname(AUDIT_LOG_PATH), "executed_sql.jsonl")
 
 def set_current_stage(stage_name: str):
     return _current_stage_var.set(stage_name)
@@ -65,15 +66,52 @@ def get_turn_telemetry() -> List[Dict[str, Any]]:
         _turn_records_var.set(records)
     return records
 
-def _write_audit_record(record: Dict[str, Any]):
+def _append_jsonl(path: str, record: Dict[str, Any]):
     try:
-        os.makedirs(os.path.dirname(AUDIT_LOG_PATH), exist_ok=True)
-        line = json.dumps(record, ensure_ascii=False)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        line = json.dumps(record, ensure_ascii=False, default=str)
         with _audit_lock:
-            with open(AUDIT_LOG_PATH, "a", encoding="utf-8") as f:
+            with open(path, "a", encoding="utf-8") as f:
                 f.write(line + "\n")
     except Exception as e:
-        logger.warning(f"Failed to append to telemetry audit file: {e}")
+        logger.warning(f"Failed to append to {os.path.basename(path)}: {e}")
+
+
+def _write_audit_record(record: Dict[str, Any]):
+    _append_jsonl(AUDIT_LOG_PATH, record)
+
+
+def log_executed_sql(question: str, sql: str, purpose: str, *, cache_hit: bool, row_count: Optional[int] = None,
+                     seconds: Optional[float] = None, error: Optional[str] = None):
+    """One line per query the executor ran or served from cache, so empty/wrong results can be audited later."""
+    _append_jsonl(SQL_LOG_PATH, {
+        "timestamp": datetime.now(timezone.utc).isoformat(), "question": question, "purpose": purpose,
+        "sql": sql, "cache_hit": cache_hit, "row_count": row_count, "seconds": seconds, "error": error,
+    })
+
+def _expected_model(node: str) -> Optional[str]:
+    """The model a node is *configured* to use (None if unknown)."""
+    profile = getattr(cfg, "NODE_LLM_PROFILES", {}).get(node)
+    if profile:
+        return profile[0]
+    if node == "router":
+        return getattr(cfg, "ROUTER_MODEL", None)
+    if node == "general":
+        return getattr(cfg, "GENERAL_MODEL", None)
+    return None
+
+
+def _was_fallback(node: str, model: str, provider: str, retries: int) -> bool:
+    """True only if a backup actually answered: a retry was needed, a different model than the node's
+    configured one responded, or the answer came from the OpenRouter backup. A node deliberately
+    configured for the 20b model (e.g. intent_analyzer) is NOT a fallback when it answers."""
+    if retries > 0:
+        return True
+    if "openrouter" in str(provider).lower():
+        return True
+    expected = _expected_model(node)
+    return bool(expected) and model not in ("unknown", expected)
+
 
 class TelemetryCallbackHandler(BaseCallbackHandler):
     """LangChain callback handler to capture per-LLM-call telemetry."""
@@ -81,30 +119,31 @@ class TelemetryCallbackHandler(BaseCallbackHandler):
     def __init__(self):
         super().__init__()
         self._starts: Dict[str, Dict[str, Any]] = {}
-        self._retries_counter: Dict[str, int] = {}
         self._lock = threading.Lock()
 
     def on_llm_start(self, serialized, prompts, *, run_id, parent_run_id=None, tags=None, metadata=None, **kwargs):
         with self._lock:
             self._starts[str(run_id)] = {
                 "start_time": time.time(),
+                "class_name": str(((serialized or {}).get("id") or [""])[-1]),
                 "invocation_params": kwargs.get("invocation_params", {}),
                 "tags": tags or [],
                 "metadata": metadata or {}
             }
 
     def on_llm_error(self, error, *, run_id, parent_run_id=None, **kwargs):
-        node = get_current_stage()
         with self._lock:
-            self._retries_counter[node] = self._retries_counter.get(node, 0) + 1
-        logger.warning(f"[Telemetry] LLM error in node '{node}': {error}")
+            self._starts.pop(str(run_id), None)  # don't leak start records for failed calls
+        logger.warning(f"[Telemetry] LLM error in node '{get_current_stage()}': {error}")
 
     def on_llm_end(self, response, *, run_id, parent_run_id=None, **kwargs):
         end_time = time.time()
         with self._lock:
             start_info = self._starts.pop(str(run_id), {})
             node = get_current_stage()
-            retries = self._retries_counter.get(node, 0)
+        # CircuitBreakerLLM stamps the attempt number of THIS call into the config metadata, so the
+        # count is per call (the old per-stage counter was never reset and inflated across turns).
+        retries = int((start_info.get("metadata") or {}).get("retry_count", 0) or 0)
         
         start_time = start_info.get("start_time", end_time)
         wall_time = end_time - start_time
@@ -137,15 +176,20 @@ class TelemetryCallbackHandler(BaseCallbackHandler):
         model = meta.get("model_name") or meta.get("model") or start_info.get("invocation_params", {}).get("model_name", "unknown")
         
         raw_provider = meta.get("model_provider", "")
-        if raw_provider:
+        class_name = start_info.get("class_name", "")
+        if class_name == "ChatOpenAI":      # OpenRouter is reached through the OpenAI-compatible client
+            provider = "openrouter"
+        elif class_name == "ChatGroq":
+            provider = "groq"
+        elif raw_provider:
             provider = raw_provider
         elif "groq" in str(model).lower() or getattr(cfg, "GROQ_API_KEY", None):
             provider = "groq"
         else:
             provider = "openrouter"
             
-        fallback_model = getattr(cfg, "FALLBACK_MODEL", "openai/gpt-oss-20b")
-        was_fallback = (retries > 0 or model == fallback_model)
+        was_fallback = _was_fallback(node, model, provider, retries)
+        finish_reason = meta.get("finish_reason")
         
         record = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -157,7 +201,8 @@ class TelemetryCallbackHandler(BaseCallbackHandler):
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "reasoning_tokens": reasoning_tokens,
-            "wall_time": round(wall_time, 3)
+            "wall_time": round(wall_time, 3),
+            "finish_reason": finish_reason,
         }
         
         # Write to JSONL audit log

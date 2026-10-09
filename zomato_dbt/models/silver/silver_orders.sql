@@ -1,5 +1,9 @@
 {{ config(
-    materialized='table'
+    materialized='incremental',
+    incremental_strategy='merge',
+    unique_key='order_id',
+    file_format='delta',
+    on_schema_change='sync_all_columns'
 ) }}
 
 SELECT 
@@ -35,7 +39,14 @@ SELECT
     TRY_CAST(delivery_time_min AS INT) AS delivery_time_min
 
 FROM {{ source('zomato_bronze', 'bronze_orders') }}
--- لو اسم الجدول في البرونز مختلف عندك تأكد إنك تعدله
+
+{% if is_incremental() %}
+-- Incremental: only look at rows newer than what is already loaded. The 3-day lookback re-reads a small
+-- window so late-arriving rows are picked up; MERGE on order_id makes the overlap idempotent.
+WHERE TRY_CAST(order_timestamp AS TIMESTAMP) >= (
+    SELECT COALESCE(MAX(order_timestamp), TIMESTAMP '1900-01-01') - INTERVAL 3 DAYS FROM {{ this }}
+)
+{% endif %}
 
 -- منع تكرار الطلبات (لو الطلب متكرر، هناخد أحدث نسخة منه بناءً على وقت الطلب)
 QUALIFY ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY order_timestamp DESC) = 1

@@ -379,3 +379,9 @@ Agentic-Data-Lakehouse/
 - **GitHub:** [@shehapsherif11-bit](https://github.com/shehapsherif11-bit)  
 - **LinkedIn:** [Shehab El-Batanouny](https://www.linkedin.com/in/shehapsherif/)  
 - **Project Repository:** [Agentic-Data-Lakehouse](https://github.com/shehapsherif11-bit/Agentic-Data-Lakehouse)
+
+ 
+ # #   N e w   F e a t u r e s 
+ -   * * M L   B a t c h   S e g m e n t a t i o n : * *   C u s t o m e r   c l u s t e r i n g   ( K - M e a n s )   v i a   A i r f l o w   i n t o   d i m _ u s e r s . 
+ -   * * P e r f o r m a n c e   C a c h i n g : * *   S H A 2 5 6 - n o r m a l i z e d   S Q L   c a c h i n g   b o u n d e d   b y   d b t _ b u i l d _ a i   r u n s .  
+ 
