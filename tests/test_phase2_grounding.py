@@ -41,7 +41,7 @@ def test_grounding_fallback_template(monkeypatch):
     # We want to jump straight to insight generator to test it, or run full graph
     # Let's mock DB to return 100
     llm = FakeLLMPhase2([
-        '{"is_followup": false, "intent_type": "simple_query", "metrics": ["revenue"], "dimensions": [], "filters": [], "is_driver_question": false}',
+        '{"is_followup": false, "intent_type": "simple_query", "metrics": ["revenue"], "dimensions": [], "filters": ["city = Cairo"], "is_driver_question": false}',
         '{}', 
         '```sql\nSELECT 100 as rev FROM workspace.zomato_gold.t\n```', 
         # First try: LLM invents a number "500"
@@ -72,7 +72,7 @@ def test_grounding_fallback_template(monkeypatch):
 def test_grounding_correct_passes(monkeypatch):
     graph = build_analyst_graph()
     llm = FakeLLMPhase2([
-        '{"is_followup": false, "intent_type": "simple_query", "metrics": ["revenue"], "dimensions": [], "filters": [], "is_driver_question": false}',
+        '{"is_followup": false, "intent_type": "simple_query", "metrics": ["revenue"], "dimensions": [], "filters": ["city = Cairo"], "is_driver_question": false}',
         '{}', 
         '```sql\nSELECT 100 as rev FROM workspace.zomato_gold.t\n```', 
         # LLM tells the truth
@@ -98,7 +98,7 @@ def test_grounding_correct_passes(monkeypatch):
 def test_grounding_arabic_indic_digits(monkeypatch):
     graph = build_analyst_graph()
     llm = FakeLLMPhase2([
-        '{"is_followup": false, "intent_type": "simple_query", "metrics": ["revenue"], "dimensions": [], "filters": [], "is_driver_question": false}',
+        '{"is_followup": false, "intent_type": "simple_query", "metrics": ["revenue"], "dimensions": [], "filters": ["city = Cairo"], "is_driver_question": false}',
         '{}', 
         '```sql\nSELECT 100 as rev FROM workspace.zomato_gold.t\n```', 
         # LLM tells the truth but with Arabic-Indic digits 

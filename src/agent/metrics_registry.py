@@ -53,6 +53,14 @@ TABLE_GRAINS = {
         "grain": "one row per user",
         "pk": "user_id",
         "relationships": {}
+    },
+    "workspace.zomato_gold.ai_customer_segments": {
+        "alias": "cs",
+        "grain": "one row per user",
+        "pk": "user_id",
+        "relationships": {
+            "dim_users": {"join_key": "user_id", "type": "one-to-one"}
+        }
     }
 }
 
@@ -89,6 +97,9 @@ COLUMN_CATALOG = {
         "gender": "string", "marital_status": "string", "occupation": "string",
         "monthly_income": "string", "educational_qualifications": "string",
         "family_size": "int", "family_segment": "string"
+    },
+    "workspace.zomato_gold.ai_customer_segments": {
+        "user_id": "int", "customer_segment": "string"
     }
 }
 
@@ -229,7 +240,7 @@ METRICS = {
         "source_table": "workspace.zomato_gold.fact_orders",
         "description": "Customer retention rate over time",
         "aggregation_type": "COMPLEX",
-        "missing_reason": "complex"
+        "missing_reason": "needs a cohort / repeat-purchase definition that is not in the metric catalog yet"
     },
 
     # TEMPORAL metric templates
@@ -302,6 +313,10 @@ def resolve_metric(metric_name: str) -> dict:
         "contribution_share": "revenue",
         "restaurant contribution": "revenue",
         "restaurant_contribution": "revenue",
+        "customer retention": "retention_rate",
+        "retention": "retention_rate",
+        "churn": "retention_rate",
+        "churn rate": "retention_rate",
         "order change": "total_orders",
         "order decline": "total_orders",
         "order drop": "total_orders",
@@ -325,7 +340,7 @@ def resolve_metric(metric_name: str) -> dict:
     if resolved_name in METRICS:
         metric = METRICS[resolved_name]
         if metric.get("sql_expression") is None and "sql_template" not in metric:
-            status = "complex" if metric.get("missing_reason") == "complex" else "missing"
+            status = "complex" if metric.get("aggregation_type") == "COMPLEX" else "missing"
             return {
                 "name": resolved_name,
                 "status": status,
@@ -349,7 +364,7 @@ def resolve_metric(metric_name: str) -> dict:
             disp_lower = value["display_name"].lower()
             if search_pattern.search(disp_lower) or search_pattern.search(key.replace("_", " ")):
                 if value.get("sql_expression") is None and "sql_template" not in value:
-                    status = "complex" if value.get("missing_reason") == "complex" else "missing"
+                    status = "complex" if value.get("aggregation_type") == "COMPLEX" else "missing"
                     return {
                         "name": key,
                         "status": status,
@@ -369,6 +384,58 @@ def resolve_metric(metric_name: str) -> dict:
         "definition": None,
         "missing_reason": "Unknown metric"
     }
+
+# Metrics whose per-group values add up to the overall total, so "share of total" is meaningful for them.
+ADDITIVE_METRICS = ("revenue", "total_orders", "total_discount")
+
+_DERIVED_TOKENS = {"percentage", "percent", "pct", "share", "contribution", "proportion"}
+_DERIVED_FILLER = _DERIVED_TOKENS | {"of", "to", "total", "overall", "the", "in", "from"}
+
+
+def split_derived_metric(metric_name: str) -> tuple:
+    """('percentage_of_total_revenue') -> ('revenue', ['share_of_total']).
+
+    The intent LLM names a derived column as if it were a metric; refusing it as "not in the catalog" is wrong
+    when the base metric exists. Only touches names the catalog cannot already resolve. Returns (base_or_None,
+    derived); (metric_name, []) when the name is not a derived measure."""
+    name = str(metric_name or "")
+    if resolve_metric(name)["status"] not in ("missing", "complex"):
+        return name, []
+    tokens = name.lower().replace("_", " ").replace("-", " ").split()
+    if not (_DERIVED_TOKENS & set(tokens)):
+        return name, []
+    base = " ".join(t for t in tokens if t not in _DERIVED_FILLER)
+    if base and resolve_metric(base)["status"] in ("missing", "complex"):
+        return name, []   # a base we cannot resolve either: keep the original so the user is told what is missing
+    return (base or None), ["share_of_total"]
+
+
+def list_available_metrics() -> list[str]:
+    """Display names of every metric the catalog can actually compute (the source of truth for 'what can I ask?')."""
+    return [m["display_name"] for m in METRICS.values()
+            if m.get("sql_expression") is not None or "sql_template" in m]
+
+
+_RETENTION_ALTERNATIVES_EN = (
+    "Retention itself is not defined, but these related measures are available: customers per period, "
+    "average orders per customer, and the K-Means customer segments (e.g. 'At Risk', 'Loyal')."
+)
+_RETENTION_ALTERNATIVES_AR = (
+    "الاحتفاظ بالعملاء (retention) نفسه مش معرّف، لكن فيه مقاييس قريبة متاحة: عدد العملاء، "
+    "متوسط الطلبات لكل عميل، وشرائح العملاء (مثل 'At Risk' و 'Loyal')."
+)
+
+
+def alternatives_hint(missing: list[dict], ar: bool = False) -> str:
+    """Suggest REAL alternatives for the missing metrics. Never substitutes silently: the caller shows it as a suggestion."""
+    names = " ".join(str(m.get("name", "")).lower() for m in missing)
+    if any(k in names for k in ("retention", "churn", "loyalty")):
+        return _RETENTION_ALTERNATIVES_AR if ar else _RETENTION_ALTERNATIVES_EN
+    if any(k in names for k in ("profit", "margin", "cost")):
+        return ("البديل المتاح: الإيراد، عدد الطلبات، متوسط قيمة الطلب، ونسبة الخصم." if ar
+                else "Available alternatives: revenue, total orders, average order value and discount rate.")
+    return ""
+
 
 def check_data_sufficiency(required_metrics: list[str], required_dimensions: list[str]) -> dict:
     """Check if all required metrics and dimensions can be computed.
@@ -422,6 +489,9 @@ def get_table_alias(table_name: str) -> str:
     full_table = table_name if "workspace.zomato_gold" in table_name else f"workspace.zomato_gold.{table_name}"
     return TABLE_GRAINS.get(full_table, {}).get("alias", "")
 
+import functools
+
+@functools.lru_cache(maxsize=1)
 def get_schema_context_for_llm() -> str:
     """Build a compact schema reference string for inclusion in LLM prompts.
     Includes table names, columns, types, grain, and relationships."""
@@ -441,7 +511,8 @@ def get_schema_context_for_llm() -> str:
         
     return context.strip()
 
-def get_lean_schema_context_for_llm(relevant_tables: list[str] = None) -> str:
+@functools.lru_cache(maxsize=32)
+def get_lean_schema_context_for_llm(relevant_tables: tuple = None) -> str:
     """Builds a token-efficient schema context including only relevant tables.
     If relevant_tables is omitted, includes core tables (fact_orders, dim_resturant, dim_date)."""
     if not relevant_tables:

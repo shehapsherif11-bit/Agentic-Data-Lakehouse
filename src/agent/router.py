@@ -30,7 +30,7 @@ from datetime import datetime
 from langchain_core.messages import HumanMessage
 
 import router_config as cfg
-from router_graph import build_graph, logger
+from router_graph import build_graph, logger, warm_up_db
 
 # ==========================================
 # Optional: Rich terminal UI
@@ -103,7 +103,7 @@ def print_banner():
         console.print(
             Panel.fit(
                 "[bold]🚀 Master Agent System[/bold]\n"
-                "SQL Analyst  •  ETL Analyst  •  General Assistant\n"
+                "Data Analyst  •  General Assistant\n"
                 "[dim]Type in Arabic, English, or a mix — I'll match your style.[/dim]",
                 border_style="cyan",
             )
@@ -132,6 +132,7 @@ def main():
     logger.info("%s New session started %s %s", "=" * 40, datetime.now().isoformat(), "=" * 40)
 
     app = build_graph()
+    warm_up_db(background=True)  # cold-start (warehouse, connection, schema) off the critical path
     thread_id = f"session-{int(time.time())}"
     graph_config = {"configurable": {"thread_id": thread_id}}
 

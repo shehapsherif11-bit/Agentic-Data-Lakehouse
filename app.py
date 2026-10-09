@@ -30,13 +30,12 @@ if _AI_AGENTS_PATH not in sys.path:
 # its own presentation layer. This also avoids paying for/needing those
 # optional CLI dependencies in a web deployment.
 try:
-    from src.agent.router_graph import build_graph, etl_analyst_agent, analyst_agent, logger
+    from src.agent.router_graph import build_graph, analyst_agent, logger, warm_up_db
     from src.agent.router_config import ROUTE_LABELS, GROQ_API_KEY
     IMPORT_ERROR = None
 except Exception as e:  # noqa: BLE001 - surfaced to the user as a friendly startup error below
     IMPORT_ERROR = e
     analyst_agent = None
-    etl_analyst_agent = None
     logger = logging.getLogger("streamlit_app")
 
 MAX_INPUT_CHARS = 4000       # guard against pasting huge blobs of text into the chat
@@ -45,9 +44,9 @@ MAX_HISTORY_MESSAGES = 60    # cap in-memory chat history so a very long session
 NODE_STATUS_LABELS = {
     "router": "🧭 تحليل السؤال وتحديد الوكيل المناسب...",
     "analysis": "📊 يتم تحليل السؤال بعمق وتدقيق الأرقام...",
-    "etl": "🌐 يتم تنفيذ عملية الاستخراج / المعالجة...",
     "general": "🧠 يتم صياغة الرد...",
-    "polish": "✨ يتم صقل الإجابة النهائية...",
+    "advisor": "💡 بقارن النتائج عشان أرشّحلك...",
+    "followup": "🩺 بشخّص المشكلة وبقارن بالمنافسين...",
 }
 
 # ==========================================
@@ -88,7 +87,14 @@ if not GROQ_API_KEY:
 
 @st.cache_resource
 def load_agent_system():
-    return build_graph()
+    graph = build_graph()
+    try:
+        # Background: wake the warehouse, open the first connection and load the Gold schema now,
+        # so the first user question doesn't pay the cold start.
+        warm_up_db(background=True)
+    except Exception as e:  # noqa: BLE001 - warm-up is an optimisation only
+        logger.warning("DB warm-up not started: %s", e)
+    return graph
 
 
 try:
@@ -133,13 +139,6 @@ with st.sidebar:
 
     # B0.1 Legacy SQL route quarantined for security
     st.info("🔒 SQL Direct: Retired (Protected via Analyst)")
-
-    # B0.2 ETL Agent gated behind ENABLE_ETL_AGENT feature flag
-    etl_enabled = os.getenv("ENABLE_ETL_AGENT", "false").lower() in ("true", "1", "yes")
-    if etl_enabled and etl_analyst_agent is not None:
-        st.success("✅ ETL Agent: Online")
-    else:
-        st.warning("🔒 ETL Agent: Disabled (Security Sandbox Flag)")
 
     st.success("✅ Master Router: Active")
 
@@ -237,6 +236,7 @@ if user_query:
             status_box = st.status("🧭 المدير بيحلل سؤالك...", expanded=False)
             final_answer = "عذراً، لم أتمكن من توليد إجابة."
             route_meta = None
+            snapshot = {}
             try:
                 for chunk in app_graph.stream({"messages": [HumanMessage(content=user_query)]}, config=graph_config):
                     node_name = next(iter(chunk.keys()), None)
@@ -247,8 +247,10 @@ if user_query:
                 final_answer = snapshot.get("final_answer", final_answer)
                 if snapshot.get("route"):
                     route_meta = {"route": snapshot["route"], "confidence": snapshot.get("confidence", 0.0)}
-                if snapshot.get("evidence"):
-                    route_meta["evidence"] = snapshot["evidence"]
+                    # Evidence persists across turns in the checkpoint: only show its provenance on turns
+                    # that actually rely on it (a GENERAL chat turn must not display an old SQL query).
+                    if snapshot.get("turn_evidence"):
+                        route_meta["evidence"] = snapshot["turn_evidence"]
 
                 status_box.update(label="✅ تم", state="complete")
                 st.markdown(final_answer)

@@ -7,6 +7,11 @@ models:
         data_tests:
           - unique
           - not_null
+      - name: customer_segment
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['High Value', 'Loyal', 'Occasional', 'At Risk', 'Unknown']
   
   # تعديل الاسم عشان يطابق اسم الملف عندك بالظبط
   - name: dim_resturant

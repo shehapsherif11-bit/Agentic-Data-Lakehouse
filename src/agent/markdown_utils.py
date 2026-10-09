@@ -62,7 +62,8 @@ def format_markdown_table(
     rows: List[Dict[str, Any]], 
     columns: Optional[List[str]] = None,
     max_rows: int = 15,
-    lang: str = "en"
+    lang: str = "en",
+    min_rows: int = 3,
 ) -> str:
     """
     Renders a list of row dicts as a strictly formatted Markdown table.
@@ -73,7 +74,7 @@ def format_markdown_table(
       - Thousands separators for numbers (e.g. 1,921,496)
       - Fixed decimal places for percentages and floating point values
     """
-    if not rows or len(rows) < 3:
+    if not rows or len(rows) < min_rows:
         return ""
 
     display_rows = rows[:max_rows]
@@ -123,6 +124,8 @@ def format_markdown_table(
             val = row.get(c)
             if val is None:
                 formatted_vals.append("-")
+            elif c.lower() == "id" or c.lower().endswith("_id"):
+                formatted_vals.append(str(val))   # identifiers are labels, not quantities: no "42,666"
             elif isinstance(val, float):
                 if "pct" in c.lower() or "percent" in c.lower():
                     formatted_vals.append(f"{val:+.2f}%" if val != 0 else "0.00%")

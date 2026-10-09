@@ -20,7 +20,7 @@ def test_scenario_a_repair_success(monkeypatch):
     graph = build_analyst_graph()
     
     llm = FakeLLM([
-        '{"is_followup": false, "intent_type": "simple_query", "metrics": ["revenue"], "dimensions": [], "filters": [], "is_driver_question": false}',
+        '{"is_followup": false, "intent_type": "simple_query", "metrics": ["revenue"], "dimensions": [], "filters": ["city = Cairo"], "is_driver_question": false}',
         '{}', 
         '```sql\nSELECT * FROM t\n```', 
         '```sql\nSELECT a FROM workspace.zomato_gold.t\n```', 
@@ -57,7 +57,7 @@ def test_scenario_b_max_repairs(monkeypatch):
     graph = build_analyst_graph()
     
     llm = FakeLLM([
-        '{"is_followup": false, "intent_type": "simple_query", "metrics": ["revenue"], "dimensions": [], "filters": [], "is_driver_question": false}',
+        '{"is_followup": false, "intent_type": "simple_query", "metrics": ["revenue"], "dimensions": [], "filters": ["city = Cairo"], "is_driver_question": false}',
         '{}',
         '```sql\nDROP TABLE workspace.zomato_gold.t\n```',
         '```sql\nDROP TABLE workspace.zomato_gold.t\n```',

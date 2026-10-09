@@ -6,7 +6,12 @@ RUN pip install --no-cache-dir \
     apache-airflow-providers-databricks \
     apache-airflow-providers-fab \
     databricks-sql-connector \
-    requests
+    requests \
+    httpx \
+    pandas \
+    pyarrow \
+    scikit-learn \
+    python-dotenv
 
 # dbt in its own venv so it never clashes with Airflow's deps.
 # dbt-databricks التعديل الجوهري لتسطيب 

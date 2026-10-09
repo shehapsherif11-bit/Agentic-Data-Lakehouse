@@ -1,6 +1,7 @@
 {{ config(
     materialized='table',
-    schema='zomato_gold'  
+    schema='zomato_gold',
+    tags=['core', 'ai']
 ) }}
 
 WITH users AS (
@@ -8,7 +9,7 @@ WITH users AS (
 )
 
 SELECT 
-    user_id,
+    u.user_id,
     name,
     email,
     age,
@@ -36,6 +37,9 @@ SELECT
         WHEN family_size BETWEEN 3 AND 4 THEN 'Small Family'
         WHEN family_size >= 5 THEN 'Large Family'
         ELSE 'Unknown'
-    END AS family_segment
+    END AS family_segment,
+    
+    COALESCE(s.customer_segment, 'Unknown') AS customer_segment
 
-FROM users
+FROM users u
+LEFT JOIN workspace.zomato_gold.ai_customer_segments s ON u.user_id = s.user_id

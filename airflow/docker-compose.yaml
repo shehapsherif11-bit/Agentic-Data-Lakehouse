@@ -20,7 +20,8 @@ x-airflow-common: &airflow-common
     - ./dags:/opt/airflow/dags
     - ./logs:/opt/airflow/logs
     - ../zomato_dbt:/opt/airflow/dbt/zomato      # ربط فولدر dbt بتاعنا (تأكد إن اسمه صح)
-    - ../ai:/opt/airflow/ai                      # فولدر الذكاء الاصطناعي للمرحلة التانية
+    - ../metadata:/opt/airflow/metadata          # marker اللي بيقرأه الـ query cache (last_ai_run.txt)
+    - ../ai:/opt/airflow/ai                     # فولدر الذكاء الاصطناعي للمرحلة التانية
   depends_on:
     postgres:
       condition: service_healthy
