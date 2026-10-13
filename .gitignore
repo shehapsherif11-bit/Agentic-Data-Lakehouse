@@ -35,3 +35,4 @@ Enterprise-Agentic-Lakehouse/
 metadata/
 last_ai_run.txt
 .llm_cache/
+.query_cache/

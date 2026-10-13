@@ -61,7 +61,11 @@ except ImportError:
     )
     from token_budget import check_budget_available, record_tokens
 
-from src.utils.database import DatabricksUtil
+if os.getenv("DEMO_MODE", "").lower() in ("1", "true", "yes"):
+    # Public live demo: a frozen sample in DuckDB instead of the Databricks warehouse. Same interface.
+    from src.utils.demo_database import DemoDuckDBUtil as DatabricksUtil
+else:
+    from src.utils.database import DatabricksUtil
 from src.utils.pipeline_marker import read_marker
 from src.agent.sql_safety_guard import check_sql_safety, check_multiple_queries as safety_check_batch, MAX_ROWS
 
