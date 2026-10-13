@@ -100,7 +100,9 @@ def format_markdown_table(
     header_titles = []
     for c in cols:
         norm = c.lower().replace("_", " ").strip()
-        if "pct" in norm or "percent" in norm:
+        if "of total" in norm or "share" in norm:
+            title = "% of Total"  # a share of the whole, not a change between two periods
+        elif "pct" in norm or "percent" in norm:
             title = "% Change"
         elif "contribution" in norm:
             title = "% of Net Change"
@@ -127,7 +129,9 @@ def format_markdown_table(
             elif c.lower() == "id" or c.lower().endswith("_id"):
                 formatted_vals.append(str(val))   # identifiers are labels, not quantities: no "42,666"
             elif isinstance(val, float):
-                if "pct" in c.lower() or "percent" in c.lower():
+                if "of_total" in c.lower() or "share" in c.lower():
+                    formatted_vals.append(f"{val:.2f}%")
+                elif "pct" in c.lower() or "percent" in c.lower():
                     formatted_vals.append(f"{val:+.2f}%" if val != 0 else "0.00%")
                 elif "contribution" in c.lower():
                     pct_val = val * 100 if abs(val) <= 1.0 else val
