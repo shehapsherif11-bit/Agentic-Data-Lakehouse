@@ -174,7 +174,7 @@ The renderer then adds the honesty layer: it compares the change with normal var
 | Layer | Where | What it enforces |
 | :--- | :--- | :--- |
 | Token budget | [`token_budget.py`](src/agent/token_budget.py) | 60k tokens per session, 180k per day (configurable) |
-| AST SQL guard | [`sql_safety_guard.py`](src/agent/sql_safety_guard.py) | Exactly one `SELECT`; schema `workspace.zomato_gold` only; no DDL/DML; blocks `read_files`, `http_request`, `remote_query`, `ai_query`; injects `LIMIT 10000` |
+| AST SQL guard | [`sql_safety_guard.py`](src/agent/sql_safety_guard.py) | Exactly one `SELECT`; schema `workspace.zomato_gold` only; no DDL/DML; blocks `read_files`, `http_request`, `remote_query` and every `ai_*` function, in any position (select list, `WHERE`, subquery, CTE); a CTE name cannot hide a table in another schema; injects `LIMIT 10000` and lowers any larger limit (a non-integer `LIMIT` is rejected) |
 | Strict interpolation | `period_change.py` | Values placed into SQL (dates) must fully match `YYYY-MM-DD`; a longer string is rejected, never truncated |
 | Least privilege | [`scripts/databricks_grants.sql`](scripts/databricks_grants.sql) | Service principal with `SELECT` on Gold only |
 | Result classification | [`result_classifier.py`](src/agent/result_classifier.py) | No rows / all NULL / all zero are explained from real coverage dates, never narrated |
