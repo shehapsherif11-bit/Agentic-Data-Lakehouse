@@ -19,8 +19,18 @@ import plotly.express as px
 import streamlit as st
 from langchain_core.messages import AIMessage, HumanMessage
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 # Public live demo: runs on a frozen sample (DuckDB) instead of the Databricks warehouse.
-DEMO_MODE = os.getenv("DEMO_MODE", "").lower() in ("1", "true", "yes")
+# Without Databricks credentials (a public deployment) the app always uses the sample, so a visitor never
+# reaches a warehouse that is not there. Must run before the agent imports below, which read DEMO_MODE.
+if "DEMO_MODE" not in os.environ and not all(
+    os.getenv(v) for v in ("DATABRICKS_HOST", "DATABRICKS_HTTP_PATH", "DATABRICKS_TOKEN")
+):
+    os.environ["DEMO_MODE"] = "1"
+DEMO_MODE =os.getenv("DEMO_MODE", "").lower() in ("1", "true", "yes")
 DEMO_MAX_QUESTIONS = int(os.getenv("DEMO_MAX_QUESTIONS", "20"))  # chat questions per visitor session
 REPO_URL = "https://github.com/shehapsherif11-bit/Agentic-Data-Lakehouse"
 
@@ -72,7 +82,7 @@ EXAMPLES = [
 ]
 
 WELCOME = (
-    "Hi! I'm the AI analyst for the Zomato Gold layer. Ask me anything about orders, revenue, restaurants, "
+    "Hi! I'm the AI analyst for the Gold layer of this data lakehouse. Ask me anything about orders, revenue, restaurants, "
     "cities or customers, in English or Arabic. Every number I give you comes from an executed query, "
     "and I'll tell you when the data can't answer.\n\n"
     "أهلاً! اسألني أي سؤال عن الطلبات والإيرادات والمطاعم والمدن، بالعربي أو بالإنجليزي."
@@ -82,7 +92,7 @@ WELCOME = (
 # 3. Page configuration
 # ==========================================
 st.set_page_config(
-    page_title="Zomato AI Data Analyst",
+    page_title="Lakehouse AI Analyst",
     page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -242,7 +252,7 @@ update_quota()
 # ==========================================
 # 7. Header
 # ==========================================
-st.title("📊 Zomato AI Data Analyst")
+st.title("📊 Lakehouse AI Analyst")
 st.caption("Ask in plain English or Arabic. See the SQL, the data and the chart behind every answer.")
 if DEMO_MODE:
     st.info(demo_banner_text())
