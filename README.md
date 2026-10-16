@@ -1,5 +1,11 @@
 # 📊 Agentic Data Lakehouse
 
+<p align="center">
+  <a href="https://agentic-data-lakehouse-payjxgq333cddap2ts9xry.streamlit.app/"><img src="https://img.shields.io/badge/%F0%9F%9A%80%20LIVE%20DEMO-Try%20it%20now-E8352E?style=for-the-badge&logo=streamlit&logoColor=white" alt="Live Demo" height="44" /></a>
+</p>
+
+<p align="center"><b><a href="https://agentic-data-lakehouse-payjxgq333cddap2ts9xry.streamlit.app/">Open the live demo</a></b>: ask the AI analyst a question in English or Arabic, no install needed. It runs on a frozen data sample.</p>
+
 **An enterprise AI Data Analyst on a Databricks Lakehouse: guarded SQL, verified numbers, evidence-based root-cause analysis, and honest answers in English & Arabic.**
 
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
