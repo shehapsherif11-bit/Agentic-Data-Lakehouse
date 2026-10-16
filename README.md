@@ -13,6 +13,12 @@
 > **Ask your data business questions in plain English or Arabic.**
 > The agent routes the question, writes Databricks SQL (or builds it deterministically when the question has a known shape), checks it with an AST safety guard, runs it read-only against a Gold star schema, and answers with numbers that trace back to executed queries. When the data cannot support a conclusion, it says so.
 
+<p align="center">
+  <img src="docs/images/architecture.gif" alt="Animated architecture: user query, router and planner, LLM or no-LLM path, AST SQL guard, Databricks or DuckDB, verification, UI output" width="720" />
+</p>
+
+<p align="center"><sub>Rebuild this animation with <code>python scripts/build_architecture_gif.py</code></sub></p>
+
 📐 Deep dive: [ARCHITECTURE.md](ARCHITECTURE.md) · 🧭 Design decisions: [DECISIONS.md](DECISIONS.md)
 
 ---
