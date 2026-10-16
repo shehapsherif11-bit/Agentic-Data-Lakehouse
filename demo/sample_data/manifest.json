@@ -1,0 +1,27 @@
+{
+  "sample_pct": 3.0,
+  "featured_brands": [
+    "KFC",
+    "Domino's Pizza",
+    "Pizza Hut",
+    "Subway",
+    "NIC Natural Ice Creams",
+    "Faasos - Wraps & Rolls",
+    "Oven Story Pizza",
+    "McDonald's",
+    "Behrouz Biryani",
+    "Kwality Walls Frozen Dessert and Ice Cream Shop"
+  ],
+  "method": "a deterministic hash sample of restaurant brands plus the brands with the most orders; all branches, orders, items and menu rows of a chosen brand are kept; built by running the project's dbt models on DuckDB from the raw CSV files",
+  "customer_segments": "recomputed on the sample with the same K-Means recipe as the Airflow task",
+  "orders": 746591,
+  "order_items": 1717514,
+  "brands": 3316,
+  "branches": 7176,
+  "customers": 91683,
+  "date_from": "2024-01-01",
+  "date_to": "2026-06-30",
+  "full_orders": 10000000,
+  "generated_at": "2026-10-13T18:49:37+00:00",
+  "emails_masked": true
+}

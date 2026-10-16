@@ -1,0 +1,322 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+@font-face { font-family: Poppins; font-weight: 500; src: url("__FONT_DIR__/poppins-500.woff2") format("woff2"); }
+@font-face { font-family: Poppins; font-weight: 600; src: url("__FONT_DIR__/poppins-600.woff2") format("woff2"); }
+@font-face { font-family: Poppins; font-weight: 700; src: url("__FONT_DIR__/poppins-700.woff2") format("woff2"); }
+@font-face { font-family: Poppins; font-weight: 800; src: url("__FONT_DIR__/poppins-800.woff2") format("woff2"); }
+html, body { margin: 0; background: #fff; }
+svg { display: block; }
+text { font-family: Poppins, "Segoe UI", sans-serif; }
+</style>
+</head>
+<body>
+<svg id="s" xmlns="http://www.w3.org/2000/svg" width="1080" height="1350" viewBox="0 0 1080 1350"></svg>
+<script>
+const ICONS = __ICONS__;
+const NS = "http://www.w3.org/2000/svg";
+
+// ---------- layout ----------
+const BW = 280, BH = 136, PK = 34;          // hexagon block: width, height, roof height
+const BCX = 410, Y0 = 246, PITCH = 128;     // block column centre x, first block top, vertical pitch
+const CARD_A = { x: 608, w: 226 }, CARD_B = { x: 844, w: 218 }, CARD_H = 104;
+const CIRCLE = { x: 108, r: 78 };
+
+// ---------- content ----------
+const STAGES = [
+  { n: 1, title: ["User", "Query"], color: "#FF8A1E",
+    chips: [{ icon: "streamlit", color: "#FF4B4B" }],
+    a: "Ask in English or Arabic in one chat box",
+    b: "Input is size-capped. Demo sessions have a quota" },
+  { n: 2, title: ["Router &", "Planner"], color: "#F6612A", rail: true,
+    chips: [{ icon: "langgraph", color: "#1C3C3C" }],
+    a: "Picks 1 of 5 routes and plans the steps",
+    b: "Cheap rules run before any LLM vote" },
+  { n: 3, title: ["LLM / No-LLM", "Path"], color: "#EE3E45", rail: true,
+    chips: [{ icon: "groq", color: "#F55036" }, { icon: "openrouter", color: "#6566F1" }],
+    a: "Rankings and reports use fixed SQL, 0 LLM calls",
+    b: "An LLM writes SQL only for open questions" },
+  { n: 4, title: ["AST SQL", "Guard"], color: "#E1277D", rail: true,
+    chips: [{ text: "sqlglot", color: "#3A2A6B" }],
+    a: "Parses each query. Bad SQL is repaired up to 3 times",
+    b: "One SELECT, Gold schema only, LIMIT enforced" },
+  { n: 5, title: ["Databricks", "/ DuckDB"], color: "#A3206E", rail: true,
+    chips: [{ icon: "databricks", color: "#FF3621" }, { icon: "duckdb", color: "#FFF000", under: "#1A1A1A" }],
+    a: "Databricks in production, DuckDB in the public demo",
+    b: "Read-only access, 30 s timeout, 1 h result cache" },
+  { n: 6, title: ["Verification"], color: "#E53C54", rail: true,
+    chips: [],
+    a: "Every number is checked against the rows returned",
+    b: "If the data cannot answer, it says so" },
+  { n: 7, title: ["UI Output"], color: "#FF8A1E",
+    chips: [{ icon: "streamlit", color: "#FF4B4B" }, { icon: "plotly", color: "#3F4F75" }],
+    a: "Table, chart and a plain-language answer",
+    b: "The SQL and an audit trail are shown with every answer" },
+];
+
+// ---------- helpers ----------
+const clamp01 = x => Math.max(0, Math.min(1, x));
+const prog = (t, s, d) => clamp01((t - s) / d);
+const eo = x => 1 - Math.pow(1 - x, 3);
+const eb = x => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2); };
+const lerp = (a, b, k) => a + (b - a) * k;
+
+function el(tag, attrs, parent) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs || {}) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+function mix(hex, other, amt) {
+  const p = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+  const a = p(hex), b = p(other);
+  return "#" + a.map((v, i) => Math.round(v + (b[i] - v) * amt).toString(16).padStart(2, "0")).join("");
+}
+function text(parent, str, x, y, o) {
+  const t = el("text", { x, y, "font-size": o.size, "font-weight": o.weight || 500, fill: o.fill || "#222",
+                         "text-anchor": o.anchor || "start" }, parent);
+  t.textContent = str;
+  return t;
+}
+const ctx = document.createElement("canvas").getContext("2d");
+function wrap(str, weight, size, maxW) {
+  ctx.font = `${weight} ${size}px Poppins`;
+  const words = str.split(" "), lines = [];
+  let cur = "";
+  for (const w of words) {
+    const test = cur ? cur + " " + w : w;
+    if (ctx.measureText(test).width <= maxW || !cur) cur = test; else { lines.push(cur); cur = w; }
+  }
+  lines.push(cur);
+  return lines;
+}
+function icon(parent, name, cx, cy, size, color, under) {
+  const ic = ICONS[name];
+  const g = el("g", {}, parent);
+  if (under) el("circle", { cx, cy, r: size / 2 * 0.98, fill: under }, g);
+  const n = el("svg", { x: cx - size / 2, y: cy - size / 2, width: size, height: size, viewBox: ic.vb, overflow: "visible" }, g);
+  for (const d of ic.paths) el("path", { d, fill: color, "fill-rule": ic.rule }, n);
+  return g;
+}
+function chipBox(parent, cx, cy, w, h) {
+  el("rect", { x: cx - w / 2, y: cy - h / 2, width: w, height: h, rx: 14, fill: "#fff", stroke: "#F3D6C6",
+               "stroke-width": 1.5, filter: "url(#chipsh)" }, parent);
+}
+
+// ---------- build ----------
+const R = {};   // references used by render()
+function build() {
+  const svg = document.getElementById("s");
+  const defs = el("defs", {}, svg);
+  const f1 = el("filter", { id: "sh", x: "-20%", y: "-20%", width: "140%", height: "150%" }, defs);
+  el("feDropShadow", { dx: 0, dy: 7, stdDeviation: 6, "flood-color": "#7A2A10", "flood-opacity": 0.24 }, f1);
+  const f2 = el("filter", { id: "chipsh", x: "-30%", y: "-30%", width: "160%", height: "170%" }, defs);
+  el("feDropShadow", { dx: 0, dy: 3, stdDeviation: 3, "flood-color": "#7A2A10", "flood-opacity": 0.18 }, f2);
+  const gp = el("linearGradient", { id: "gpill", x1: 0, y1: 0, x2: 1, y2: 0 }, defs);
+  el("stop", { offset: 0, "stop-color": "#FF8A1E" }, gp);
+  el("stop", { offset: 1, "stop-color": "#F0502D" }, gp);
+
+  // title (centred; "Analyst" in the accent gradient)
+  R.title = el("g", {}, svg);
+  const t1 = text(R.title, "Lakehouse AI", 0, 104, { size: 80, weight: 800, fill: "#15122B" });
+  const t2 = text(R.title, "Analyst", 0, 104, { size: 80, weight: 800, fill: "url(#gtitle)" });
+  const w1 = t1.getComputedTextLength(), w2 = t2.getComputedTextLength(), gap = 22;
+  const x0 = (1080 - (w1 + gap + w2)) / 2;
+  t1.setAttribute("x", x0); t2.setAttribute("x", x0 + w1 + gap);
+  const gt = el("linearGradient", { id: "gtitle", gradientUnits: "userSpaceOnUse", x1: x0 + w1, y1: 0, x2: x0 + w1 + gap + w2, y2: 0 }, defs);
+  el("stop", { offset: 0, "stop-color": "#FF7A1A" }, gt);
+  el("stop", { offset: 1, "stop-color": "#E8352E" }, gt);
+  R.sub = text(svg, "Every query is checked before it runs. Every number is verified.", 540, 152,
+               { size: 24, weight: 500, fill: "#55505F", anchor: "middle" });
+
+  // column headers
+  R.pills = el("g", {}, svg);
+  el("rect", { x: CARD_A.x, y: 186, width: CARD_A.w, height: 42, rx: 12, fill: "url(#gpill)" }, R.pills);
+  text(R.pills, "What happens", CARD_A.x + CARD_A.w / 2, 214, { size: 20, weight: 700, fill: "#fff", anchor: "middle" });
+  el("rect", { x: CARD_B.x, y: 186, width: CARD_B.w, height: 42, rx: 12, fill: "#FBD9C4" }, R.pills);
+  text(R.pills, "Why you can trust it", CARD_B.x + CARD_B.w / 2, 214, { size: 19, weight: 700, fill: "#5A2A14", anchor: "middle" });
+
+  // LangGraph circle (left)
+  const cyc = Y0 + 3 * PITCH + BH / 2;
+  R.circle = el("g", {}, svg);
+  const cg = el("g", { transform: `translate(${CIRCLE.x},${cyc})` }, R.circle);
+  R.circleInner = cg;
+  el("circle", { r: CIRCLE.r + 14, fill: "#FFF1E8" }, cg);
+  el("circle", { r: CIRCLE.r, fill: "#fff", stroke: "#FFD9C7", "stroke-width": 5, filter: "url(#sh)" }, cg);
+  icon(cg, "langgraph", 0, 0, 84, "#1C3C3C");
+  text(R.circle, "LangGraph agent", CIRCLE.x, cyc + CIRCLE.r + 40, { size: 16, weight: 700, fill: "#15122B", anchor: "middle" });
+  text(R.circle, "runs steps 2 to 6", CIRCLE.x, cyc + CIRCLE.r + 62, { size: 14, weight: 500, fill: "#7A7280", anchor: "middle" });
+
+  // stages
+  R.stages = STAGES.map((st, k) => {
+    const top = Y0 + k * PITCH, cy = top + BH / 2;
+    const S = { st, top, cy };
+    S.g = el("g", {}, svg);
+
+    // rail from the LangGraph circle to the block's left edge
+    if (st.rail) {
+      const ex = BCX - BW / 2, th = Math.atan2(cy - cyc, ex - CIRCLE.x);
+      const sx = CIRCLE.x + CIRCLE.r * Math.cos(th), sy = cyc + CIRCLE.r * Math.sin(th);
+      S.rail = el("path", { d: `M${sx},${sy} C${sx + 60},${sy} ${ex - 70},${cy} ${ex},${cy}`, fill: "none",
+                            stroke: "#F0502D", "stroke-width": 2, "stroke-linecap": "round", pathLength: 1,
+                            "stroke-dasharray": 1, "stroke-dashoffset": 1 }, S.g);
+      S.railDots = el("g", {}, S.g);
+      for (const [x, y] of [[sx, sy], [ex, cy]]) el("circle", { cx: x, cy: y, r: 5, fill: "#F0502D", stroke: "#fff", "stroke-width": 2 }, S.railDots);
+    }
+
+    // connector (block -> cards)
+    S.conn = el("line", { x1: BCX + BW / 2, y1: cy, x2: CARD_A.x, y2: cy, stroke: "#F0502D", "stroke-width": 2, "stroke-dasharray": "5 4" }, S.g);
+
+    // cards
+    S.cards = el("g", {}, S.g);
+    S.cardRects = [];
+    for (const [c, str] of [[CARD_A, st.a], [CARD_B, st.b]]) {
+      const r = el("rect", { x: c.x, y: cy - CARD_H / 2, width: c.w, height: CARD_H, rx: 14,
+                             fill: c === CARD_A ? "#FFF2E8" : "#FDEAE4", stroke: "#F5D3BF", "stroke-width": 1.5 }, S.cards);
+      S.cardRects.push(r);
+      let size = 17, lines = wrap(str, 500, size, c.w - 28);
+      if (lines.length > 3) { size = 16; lines = wrap(str, 500, size, c.w - 28); }
+      const lh = size * 1.32, y1 = cy - (lines.length - 1) * lh / 2 + size * 0.35;
+      lines.forEach((ln, i) => text(S.cards, ln, c.x + 14, y1 + i * lh, { size, weight: 500, fill: "#2A2230" }));
+    }
+
+    // hexagon block
+    S.hex = el("g", {}, S.g);
+    const hb = el("g", { filter: "url(#sh)" }, S.hex);
+    const full = `0,${PK} ${BW / 2},0 ${BW},${PK} ${BW},${BH - PK} ${BW / 2},${BH} 0,${BH - PK}`;
+    el("polygon", { points: full, fill: mix(st.color, "#000000", 0.12) }, hb);
+    el("polygon", { points: `0,${PK} ${BW / 2},0 ${BW / 2},${BH} 0,${BH - PK}`, fill: mix(st.color, "#FFFFFF", 0.14) }, hb);
+    el("polygon", { points: `0,${PK} ${BW / 2},0 ${BW},${PK} ${BW / 2},${PK * 2}`, fill: "#fff", "fill-opacity": 0.2 }, hb);
+    el("polygon", { points: full, fill: "none", stroke: "#fff", "stroke-opacity": 0.6, "stroke-width": 2.5, "stroke-linejoin": "round" }, hb);
+    S.hl = el("polygon", { points: full, fill: "#fff", "fill-opacity": 0 }, S.hex);
+    S.badge = el("g", { transform: `translate(${BW / 2},${st.title.length > 1 ? 36 : 40})` }, S.hex);
+    el("circle", { r: 15, fill: "#fff" }, S.badge);
+    text(S.badge, String(st.n), 0, 6, { size: 17, weight: 800, fill: st.color, anchor: "middle" });
+    const ty = st.title.length > 1 ? [84, 110] : [98];
+    st.title.forEach((ln, i) => text(S.hex, ln, BW / 2, ty[i], { size: 23, weight: 700, fill: "#fff", anchor: "middle" }));
+
+    // tool chips (real logos)
+    S.chips = el("g", {}, S.g);
+    S.chipItems = [];
+    const n = st.chips.length;
+    st.chips.forEach((c, i) => {
+      const ccy = n === 1 ? cy : cy + (i === 0 ? -30 : 30), ccx = BCX + BW / 2;
+      const g = el("g", {}, S.chips);
+      const inner = el("g", {}, g);
+      if (c.text) {
+        chipBox(inner, 0, 0, 92, 36);
+        text(inner, c.text, 0, 5, { size: 15, weight: 700, fill: c.color, anchor: "middle" });
+      } else {
+        const sz = n === 1 ? 56 : 50;
+        chipBox(inner, 0, 0, sz, sz);
+        icon(inner, c.icon, 0, 0, sz - 22, c.color, c.under);
+      }
+      S.chipItems.push({ g, ccx, ccy });
+    });
+    return S;
+  });
+
+  // bottom panel
+  R.panel = el("g", {}, svg);
+  el("rect", { x: 24, y: 1176, width: 1032, height: 104, rx: 20, fill: "#FFF1E8", stroke: "#FAD9C6", "stroke-width": 1.5 }, R.panel);
+  const items = [
+    { kind: "doc", lines: wrap("Rules and fixed SQL first. An LLM only when it is needed", 600, 17, 215) },
+    { kind: "logos", lines: wrap("Gold tables built daily with dbt and Airflow", 600, 17, 215) },
+    { kind: "shield", lines: wrap("One safety guard and one cache on every route", 600, 17, 215) },
+  ];
+  items.forEach((it, i) => {
+    const x = 48 + i * 344, cy = 1228;
+    if (i > 0) el("line", { x1: x - 18, y1: 1196, x2: x - 18, y2: 1260, stroke: "#F3C9B3", "stroke-width": 1.5 }, R.panel);
+    if (it.kind === "logos") {
+      [["dbt", "#FF694B"], ["airflow", "#017CEE"], ["docker", "#2496ED"]].forEach(([n, c], j) => {
+        const gx = x + 22, gy = cy - 28 + j * 28;
+        el("circle", { cx: gx, cy: gy, r: 13, fill: "#fff", stroke: "#F3D6C6", "stroke-width": 1.2 }, R.panel);
+        icon(R.panel, n, gx, gy, 17, c);
+      });
+    } else {
+      const g = el("g", { transform: `translate(${x + 22},${cy})` }, R.panel);
+      el("circle", { r: 24, fill: it.kind === "doc" ? "#FF8A1E" : "#E1277D" }, g);
+      const common = { fill: "none", stroke: "#fff", "stroke-width": 2.4, "stroke-linecap": "round", "stroke-linejoin": "round" };
+      if (it.kind === "doc") {
+        el("path", { d: "M-7,-11 h9 l6,6 v16 h-15 z M2,-11 v6 h6 M-3,1 h7 M-3,6 h7", ...common }, g);
+      } else {
+        el("path", { d: "M0,-12 l10,4 v7 c0,7 -4,11 -10,14 c-6,-3 -10,-7 -10,-14 v-7 z M-4,0 l3,3 l6,-6", ...common }, g);
+      }
+    }
+    const lh = 22, y1 = cy - (it.lines.length - 1) * lh / 2 + 6;
+    it.lines.forEach((ln, j) => text(R.panel, ln, x + 62, y1 + j * lh, { size: 17, weight: 600, fill: "#2A2230" }));
+  });
+
+  // footnote
+  R.note = el("g", {}, svg);
+  el("rect", { x: 24, y: 1294, width: 1032, height: 42, rx: 14, fill: "#F1EEF0" }, R.note);
+  el("circle", { cx: 60, cy: 1315, r: 9, fill: "none", stroke: "#6B6570", "stroke-width": 1.8 }, R.note);
+  text(R.note, "i", 60, 1320, { size: 13, weight: 700, fill: "#6B6570", anchor: "middle" });
+  text(R.note, "The live demo runs on a frozen data sample. Numbers describe the sample, not the full platform.", 80, 1320,
+       { size: 15, weight: 500, fill: "#4A4550" });
+}
+
+// ---------- animation: render(t) draws the frame at time t (seconds) ----------
+const SCAN_START = 5.3, SCAN_STEP = 0.4;
+function render(t, scan) {
+  const pt = eo(prog(t, 0, 0.5));
+  R.title.setAttribute("opacity", pt);
+  R.title.setAttribute("transform", `translate(0,${-16 * (1 - pt)})`);
+  R.sub.setAttribute("opacity", prog(t, 0.25, 0.5));
+  R.pills.setAttribute("opacity", prog(t, 0.5, 0.4));
+
+  const pc = prog(t, 0.6, 0.5), sc = lerp(0.8, 1, eb(pc));
+  R.circle.setAttribute("opacity", Math.min(1, pc * 1.6));
+  R.circleInner.setAttribute("transform", `translate(${CIRCLE.x},${Y0 + 3 * PITCH + BH / 2}) scale(${sc})`);
+
+  R.stages.forEach((S, k) => {
+    const s = 0.9 + 0.45 * k;
+    const pb = prog(t, s, 0.45);
+    const act = scan ? Math.sin(Math.PI * clamp01((t - (SCAN_START + SCAN_STEP * k)) / SCAN_STEP)) : 0;
+
+    S.g.setAttribute("opacity", pb > 0 ? 1 : 0);
+    const scl = lerp(0.82, 1, eb(pb)) * (1 + 0.035 * act), dy = -26 * (1 - eo(pb));
+    S.hex.setAttribute("opacity", Math.min(1, pb * 1.6));
+    S.hex.setAttribute("transform",
+      `translate(${BCX},${S.cy + dy}) scale(${scl}) translate(${-BW / 2},${-BH / 2})`);
+    S.hl.setAttribute("fill-opacity", 0.3 * act);
+    S.badge.setAttribute("transform", `translate(${BW / 2},${S.st.title.length > 1 ? 36 : 40}) scale(${1 + 0.25 * act})`);
+
+    const pcard = prog(t, s + 0.15, 0.4);
+    S.cards.setAttribute("opacity", pcard);
+    S.cards.setAttribute("transform", `translate(${40 * (1 - eo(pcard))},0)`);
+    S.conn.setAttribute("opacity", pcard);
+    S.cardRects.forEach((r, i) => {
+      r.setAttribute("stroke", act > 0.02 ? "#FF7A1A" : "#F5D3BF");
+      r.setAttribute("stroke-width", 1.5 + 1.5 * act);
+      r.setAttribute("fill", mix(i === 0 ? "#FFF2E8" : "#FDEAE4", "#FFD3B3", act * 0.8));
+    });
+    S.conn.setAttribute("stroke-width", 2 + 1.5 * act);
+
+    if (S.rail) {
+      const pr = eo(prog(t, s, 0.5));
+      S.rail.setAttribute("stroke-dashoffset", 1 - pr);
+      S.rail.setAttribute("stroke-width", 2 + 2.5 * act);
+      S.railDots.setAttribute("opacity", pr > 0.05 ? 1 : 0);
+    }
+
+    const pchip = prog(t, s + 0.3, 0.3), cs = eb(pchip);
+    S.chips.setAttribute("opacity", Math.min(1, pchip * 2));
+    S.chipItems.forEach(c => c.g.setAttribute("transform", `translate(${c.ccx},${c.ccy}) scale(${Math.max(0.01, cs)})`));
+  });
+
+  R.panel.setAttribute("opacity", prog(t, 4.2, 0.5));
+  R.note.setAttribute("opacity", prog(t, 4.7, 0.4));
+}
+
+async function init() {
+  await Promise.all([500, 600, 700, 800].map(w => document.fonts.load(`${w} 20px Poppins`)));
+  build();
+  window.READY = true;
+}
+init();
+</script>
+</body>
+</html>

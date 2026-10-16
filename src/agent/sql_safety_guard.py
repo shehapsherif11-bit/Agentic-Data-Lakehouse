@@ -25,6 +25,21 @@ DANGEROUS_FUNCTIONS = {
 ALLOWED_SCHEMA = "workspace.zomato_gold"
 MAX_ROWS = 10000
 
+# Whole families of functions that send row data to a model endpoint (ai_query, ai_gen, ai_classify, ...).
+DANGEROUS_FUNCTION_PREFIXES = ("ai_",)
+
+
+def _function_name(func: exp.Func) -> str:
+    """Lower-cased name of a function as the SQL spells it.
+
+    sqlglot parses functions it does not know (ai_query, http_request, remote_query, ...) as exp.Anonymous.
+    For those, Func.sql_name() returns the class name "ANONYMOUS", never the real name, so a blocklist
+    that compares sql_name() never matches. The real name lives on the node itself.
+    """
+    if isinstance(func, exp.Anonymous):
+        return str(func.name).lower()
+    return func.sql_name().lower()
+
 def guard_sql(sql: str) -> tuple[str, bool]:
     """
     Validates SQL using AST parsing (sqlglot) against security rules.
@@ -80,7 +95,9 @@ def guard_sql(sql: str) -> tuple[str, bool]:
             raise SQLGuardError(f"Table-valued functions or non-identifier table references are not allowed: {table.sql()}")
             
         table_name = table.name.lower()
-        if table_name in cte_names:
+        # A bare name that matches a CTE is a CTE reference. A qualified name never is: skipping it would let
+        # "WITH s AS (...) SELECT ... FROM workspace.zomato_silver.s" read a schema the guard must block.
+        if not table.db and not table.catalog and table_name in cte_names:
             continue
             
         db_name = table.db.lower()
@@ -97,14 +114,24 @@ def guard_sql(sql: str) -> tuple[str, bool]:
 
     # 5. Dangerous functions
     for func in ast.find_all(exp.Func):
-        if func.sql_name().lower() in DANGEROUS_FUNCTIONS:
-            raise SQLGuardError(f"Dangerous function detected: {func.sql_name()}")
+        name = _function_name(func)
+        if name in DANGEROUS_FUNCTIONS or name.startswith(DANGEROUS_FUNCTION_PREFIXES):
+            raise SQLGuardError(f"Dangerous function detected: {name}")
             
-    # 6. Inject LIMIT 10000 if the top-level query has none
+    # 6. Cap every result at MAX_ROWS: add a LIMIT when there is none and lower one that is larger. A LIMIT
+    #    that is not a plain integer cannot be capped, so it is rejected. limit_injected is True whenever the
+    #    guard set or lowered the limit, which lets callers flag a possibly truncated result.
     limit_injected = False
-    if isinstance(ast, (exp.Select, exp.Union)):
-        if not ast.args.get("limit"):
-            ast = ast.limit(MAX_ROWS)
+    limit_node = ast.args.get("limit")
+    if not limit_node:
+        ast = ast.limit(MAX_ROWS)
+        limit_injected = True
+    else:
+        limit_value = limit_node.expression
+        if not (isinstance(limit_value, exp.Literal) and limit_value.is_int):
+            raise SQLGuardError("LIMIT must be a plain integer.")
+        if int(limit_value.this) > MAX_ROWS:
+            limit_node.set("expression", exp.Literal.number(MAX_ROWS))
             limit_injected = True
 
     # Return normalized SQL
